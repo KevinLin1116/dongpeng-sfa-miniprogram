@@ -1,0 +1,16 @@
+<view class="page form-page {{readOnly?'read-only':''}}"><view class="safe-top"></view><view class="nav"><view class="nav-back" bindtap="goBack">‹</view><text class="nav-title">{{item.name || '任务填写'}}</text></view>
+  <view wx:if="{{loading}}" class="form-card card skeleton"></view>
+  <view wx:elif="{{item}}" class="form-card card"><view class="form-head"><view class="section-title">{{item.sectionName || '常规信息填写'}}</view><text>{{item.completedCount}}/{{item.fieldCount}}</text></view>
+    <view wx:if="{{readOnly}}" class="readonly-banner">任务已提交，当前仅支持查看</view>
+    <block wx:for="{{item.fields}}" wx:key="key"><view wx:if="{{item.visible}}" class="field"><text class="field-label"><text wx:if="{{item.required}}" class="required">*</text>{{item.label}}</text>
+      <picker wx:if="{{item.inputType==='singleChoice'}}" disabled="{{readOnly}}" range="{{item.options}}" data-key="{{item.key}}" bindchange="setChoice"><view class="control {{readOnly?'control-readonly':''}}">{{values[item.key] || item.placeholder || '请选择'}}<text wx:if="{{!readOnly}}">⌄</text></view></picker>
+      <textarea wx:elif="{{item.inputType==='textarea'}}" class="textarea {{readOnly?'control-readonly':''}}" disabled="{{readOnly}}" maxlength="{{item.maxLength || 200}}" value="{{values[item.key]}}" placeholder="{{item.placeholder}}" data-key="{{item.key}}" bindinput="setValue"/><text wx:if="{{item.inputType==='textarea'}}" class="counter">{{values[item.key].length}}/{{item.maxLength || 200}}</text>
+      <input wx:elif="{{item.inputType==='text' || item.inputType==='number'}}" class="control {{readOnly?'control-readonly':''}}" disabled="{{readOnly}}" type="{{item.inputType==='number'?'number':'text'}}" value="{{values[item.key]}}" placeholder="{{item.placeholder}}" data-key="{{item.key}}" bindinput="setValue"/>
+      <view wx:elif="{{item.inputType==='image'}}" class="images"><view wx:for="{{values[item.key]}}" wx:for-item="image" wx:for-index="imageIndex" wx:key="*this" class="image-wrap"><image src="{{image}}" mode="aspectFill" data-key="{{item.key}}" data-index="{{imageIndex}}" bindtap="previewImage"/><text wx:if="{{!readOnly}}" data-key="{{item.key}}" data-index="{{imageIndex}}" bindtap="removeImage">×</text></view><view wx:if="{{!readOnly && (!item.maxImages || values[item.key].length < item.maxImages)}}" class="upload" data-key="{{item.key}}" bindtap="chooseImages"><text class="upload-plus">＋</text><text class="upload-text">{{uploading[item.key]?'上传中':'上传照片'}}</text></view></view>
+      <text wx:if="{{item.inputType==='image' && item.maxImages}}" class="hint">最多上传 {{item.maxImages}} 张</text>
+      <text wx:if="{{item.inputType==='image' && !item.maxImages}}" class="hint">不限制总数，可多次上传</text>
+    </view></block>
+  </view>
+  <view wx:if="{{!readOnly}}" class="fixed-footer"><button class="primary-button" disabled="{{saving}}" bindtap="save">{{saving?'保存中…':'保存'}}</button></view>
+  <operation-progress visible="{{operationProgress.visible}}" status="{{operationProgress.status}}" title="{{operationProgress.title}}" message="{{operationProgress.message}}" hint="{{operationProgress.hint}}" elapsed-text="{{operationProgress.elapsedText}}" stage-text="{{operationProgress.stageText}}"/>
+</view>

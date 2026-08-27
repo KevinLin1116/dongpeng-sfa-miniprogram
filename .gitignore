@@ -1,0 +1,28 @@
+# Dependencies and build output
+node_modules/
+cloudfunctions/*/node_modules/
+coverage/
+dist/
+.build/
+
+# WeChat Developer Tools local state and generated previews/uploads
+project.private.config.json
+preview-info*.json
+preview-qr*.png
+upload-info*.json
+
+# Local runtime configuration and credentials
+.env
+.env.*
+!.env.example
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+
+# Editor and operating-system files
+.DS_Store
+*.log
+.idea/
+.vscode/

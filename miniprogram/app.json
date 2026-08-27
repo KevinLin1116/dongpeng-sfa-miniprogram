@@ -1,0 +1,40 @@
+{
+  "pages": [
+    "pages/home/index",
+    "pages/task-list/index",
+    "pages/task-execution/index",
+    "pages/dynamic-form/index",
+    "pages/sampling/index",
+    "pages/approvals/index",
+    "pages/approval-detail/index",
+    "pages/stats/index",
+    "pages/profile/index",
+    "pages/building/index"
+  ],
+  "window": {
+    "navigationStyle": "custom",
+    "backgroundColor": "#F5F6F8",
+    "backgroundTextStyle": "light"
+  },
+  "permission": {
+    "scope.userLocation": {
+      "desc": "用于任务签到时核验您与任务门店的距离"
+    }
+  },
+  "requiredPrivateInfos": [
+    "getLocation"
+  ],
+  "tabBar": {
+    "color": "#909399",
+    "selectedColor": "#E21413",
+    "backgroundColor": "#FFFFFF",
+    "borderStyle": "white",
+    "list": [
+      { "pagePath": "pages/home/index", "text": "首页" },
+      { "pagePath": "pages/stats/index", "text": "统计" },
+      { "pagePath": "pages/profile/index", "text": "我的" }
+    ]
+  },
+  "sitemapLocation": "sitemap.json",
+  "lazyCodeLoading": "requiredComponents"
+}

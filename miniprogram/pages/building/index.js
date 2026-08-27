@@ -1,0 +1,1 @@
+Page({ goBack() { wx.navigateBack(); } });

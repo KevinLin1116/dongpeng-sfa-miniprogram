@@ -1,0 +1,58 @@
+<view class="page detail-page">
+  <view class="safe-top"></view>
+  <view class="nav"><view class="nav-back" bindtap="goBack">‹</view><text class="nav-title">{{approval.productReview?'产品上样审核':'审核详情'}}</text></view>
+  <view wx:if="{{loading}}" class="empty">正在加载…</view>
+  <block wx:elif="{{approval}}">
+    <view class="detail-card card task-card">
+      <view class="section-title">任务信息</view>
+      <view class="detail-grid"><text>任务名称</text><text>{{approval.taskName}}</text><text>任务项</text><text>{{approval.itemName}}</text><text>门店</text><text>{{approval.storeName}}</text><text>执行人</text><text>{{approval.submitterName}}</text><text wx:if="{{approval.itemSubmissionRound}}">提交轮次</text><text wx:if="{{approval.itemSubmissionRound}}">第 {{approval.itemSubmissionRound}} 轮</text><text wx:if="{{approval.currentNodeName}}">当前节点</text><text wx:if="{{approval.currentNodeName}}">{{approval.currentNodeName}}</text></view>
+    </view>
+
+    <view wx:if="{{approval.productReview}}" class="review-toolbar">
+      <view class="review-counts"><text>待审 {{reviewSummary.total}}</text><text>已判断 {{reviewSummary.decided}}</text><text class="good">合格 {{reviewSummary.qualified}}</text><text class="bad">不合格 {{reviewSummary.unqualified}}</text></view>
+      <button wx:if="{{approval.canDecide}}" class="mark-all" disabled="{{processing}}" bindtap="markAllQualified">全部标记合格</button>
+    </view>
+    <view wx:if="{{approval.compatibilityError}}" class="compatibility-error">{{approval.compatibilityError}}</view>
+
+    <view class="detail-card card content-card">
+      <view class="section-title">{{approval.productReview?'产品审核':'提交内容'}}</view>
+      <view wx:for="{{approval.fields}}" wx:key="label" class="answer"><text>{{item.label}}</text><text>{{item.value}}</text></view>
+      <block wx:if="{{approval.evidenceGroups.length}}">
+        <view wx:for="{{approval.evidenceGroups}}" wx:for-index="groupIndex" wx:key="ruleRecordId" class="evidence-group">
+          <view class="evidence-group-head" data-index="{{groupIndex}}" bindtap="toggleGroup">
+            <view><text class="group-name">{{item.name}}</text><text class="group-meta">本轮待审 {{item.reviewRequiredCount}} 款 · 历史合格 {{item.qualifiedCount}} 款</text></view>
+            <view class="chevron {{expandedGroups[groupIndex]?'expanded':''}}"></view>
+          </view>
+          <view wx:if="{{expandedGroups[groupIndex]}}">
+            <view wx:for="{{item.products}}" wx:for-item="product" wx:for-index="productIndex" wx:key="productRecordId" class="evidence-product {{product.reviewRequired?'':'historical-qualified'}}">
+              <view class="evidence-product-head" data-id="{{product.productRecordId}}" bindtap="toggleProduct">
+                <view class="product-copy"><text class="product-name">{{product.code}}　{{product.name}}</text><text class="product-spec">{{product.specification}}</text><text wx:if="{{product.sourceKind==='rectification' && product.rejectionReason}}" class="previous-reason">上次退回：{{product.rejectionReason}}</text></view>
+                <view wx:if="{{!product.reviewRequired}}" class="qualified-lock">✓ 已合格</view>
+                <view wx:else class="chevron {{expandedProducts[product.productRecordId]?'expanded':''}}"></view>
+              </view>
+              <view wx:if="{{expandedProducts[product.productRecordId] || !product.reviewRequired}}" class="product-review-body">
+                <view wx:if="{{product.images.length}}" class="images"><image wx:for="{{product.images}}" wx:for-item="photo" wx:key="image_url" src="{{photo.image_url}}" mode="aspectFill" data-url="{{photo.image_url}}" data-group-index="{{groupIndex}}" data-product-index="{{productIndex}}" bindtap="preview"/></view>
+                <view wx:if="{{product.reviewRequired && approval.canDecide}}" class="decision-row">
+                  <button class="decision qualified {{productDecisions[product.productRecordId].decision==='qualified'?'active':''}}" data-id="{{product.productRecordId}}" data-decision="qualified" bindtap="setProductDecision">合格</button>
+                  <button class="decision unqualified {{productDecisions[product.productRecordId].decision==='unqualified'?'active':''}}" data-id="{{product.productRecordId}}" data-decision="unqualified" bindtap="setProductDecision">不合格</button>
+                </view>
+                <textarea wx:if="{{product.reviewRequired && productDecisions[product.productRecordId].decision==='unqualified'}}" class="reason-input" maxlength="500" placeholder="请填写该产品的不合格原因" value="{{productDecisions[product.productRecordId].reason}}" data-id="{{product.productRecordId}}" bindinput="inputProductReason"/>
+              </view>
+            </view>
+          </view>
+        </view>
+      </block>
+      <view wx:else class="images"><image wx:for="{{approval.legacyImages}}" wx:key="image_url" src="{{item.image_url}}" mode="aspectFill" data-url="{{item.image_url}}" data-legacy="1" bindtap="preview"/></view>
+    </view>
+
+    <view wx:if="{{approval.history.length}}" class="detail-card card"><view class="section-title">审批记录</view><view wx:for="{{approval.history}}" wx:key="decidedAt" class="history"><text>{{item.actionLabel || item.action}}</text><text>{{item.operatorName || item.decidedByName}}　{{item.atText || item.decidedAt}}</text><text wx:if="{{item.reason}}">{{item.reason}}</text></view></view>
+
+    <view wx:if="{{approval.canDecide}}" class="fixed-footer actions">
+      <button wx:if="{{approval.productReview}}" class="primary-button product-submit" disabled="{{processing}}" bindtap="submitProductReview">{{processing?'提交中…':'提交审核结果'}}</button>
+      <block wx:else><button class="secondary-button" disabled="{{processing}}" bindtap="reject">退回整改</button><button class="primary-button" disabled="{{processing}}" bindtap="approve">审核通过</button></block>
+    </view>
+  </block>
+
+  <view wx:if="{{reviewAlert.visible}}" class="review-alert-mask" catchtouchmove="noop"><view class="review-alert-panel" catchtap="noop"><view class="review-alert-head"><view class="review-alert-symbol">!</view><view><text class="review-alert-title">{{reviewAlert.title}}</text><text class="review-alert-message">{{reviewAlert.message}}</text></view></view><scroll-view class="review-alert-list" scroll-y><view wx:for="{{reviewAlert.items}}" wx:key="*this" class="review-alert-item">{{item}}</view></scroll-view><button class="review-alert-button" bindtap="closeReviewAlert">知道了</button></view></view>
+  <operation-progress visible="{{operationProgress.visible}}" status="{{operationProgress.status}}" title="{{operationProgress.title}}" message="{{operationProgress.message}}" hint="{{operationProgress.hint}}" elapsed-text="{{operationProgress.elapsedText}}" stage-text="{{operationProgress.stageText}}"/>
+</view>

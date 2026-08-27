@@ -1,0 +1,117 @@
+<view class="sampling-page">
+  <view class="safe-top"></view>
+  <view class="nav">
+    <view class="nav-back" bindtap="goBack">‹</view>
+    <text class="nav-title">{{readOnly?'产品上样详情':'产品上样'}}</text>
+  </view>
+
+  <view wx:if="{{loading}}" class="empty">正在加载产品上样要求…</view>
+  <view wx:else class="sampling-body {{readOnly?'read-only':''}}">
+    <scroll-view class="group-nav" scroll-y>
+      <view wx:for="{{navGroups}}" wx:key="key" wx:for-item="section" class="group-section">
+        <view class="group-section-head {{section.active?'active':''}}" data-key="{{section.key}}" data-index="{{section.children[0].groupIndex}}" bindtap="toggleSection">
+          <text class="group-title">{{section.level1Name}}</text>
+          <view class="section-chevron {{section.expanded?'expanded':''}}"></view>
+        </view>
+        <view wx:if="{{section.expanded}}" class="group-children">
+          <view wx:for="{{section.children}}" wx:key="id" wx:for-item="child" class="group-nav-item {{activeGroup===child.groupIndex?'active':''}} {{child.hasError?'error':''}}" data-index="{{child.groupIndex}}" bindtap="selectGroup">
+            <view class="group-nav-row">
+              <text class="group-subtitle">{{child.level2Name}}</text>
+              <text wx:if="{{child.qualified}}" class="group-check">✓</text>
+              <text wx:else class="group-progress">{{child.progressText}}</text>
+            </view>
+            <text class="group-total">共 {{child.productTotal}} 款</text>
+          </view>
+        </view>
+      </view>
+    </scroll-view>
+
+    <scroll-view class="products" scroll-y scroll-into-view="{{errorProductAnchor}}" scroll-with-animation>
+      <view wx:if="{{readOnly}}" class="readonly-banner">第 {{currentRound}} 轮已提交，当前仅支持查看<text wx:if="{{approvalStatus}}"> · {{approvalStatus}}</text></view>
+      <view wx:if="{{rejectionReason}}" class="rectify-banner">整改原因：{{rejectionReason}}</view>
+      <view wx:if="{{groups.length}}" class="group-summary">
+        <view class="summary-metric"><text>规则：</text><text class="metric-value">{{groups[activeGroup].ruleText}}</text></view>
+        <view class="summary-metric"><text>本次上报数：</text><text class="metric-value">{{groups[activeGroup].reportedProducts}}</text></view>
+        <text class="qualification {{groups[activeGroup].qualified?'qualified':'unqualified'}}">{{groups[activeGroup].qualificationText}}</text>
+      </view>
+
+      <view wx:for="{{groups[activeGroup].products}}" wx:key="id" id="product-{{item.id}}" class="product {{item.validationError?'product-error':''}} {{item.reviewState==='qualified'?'product-qualified':''}} {{item.reviewState==='rectify'?'product-rectify':''}}">
+        <view class="product-summary" data-id="{{item.id}}" bindtap="toggleProduct">
+          <image class="product-thumb" src="{{item.thumbnail}}" mode="aspectFill"/>
+          <view class="product-info">
+            <view class="product-title-row">
+              <text class="product-code">{{item.code}}</text>
+            </view>
+            <text class="product-name">{{item.name}}</text>
+            <text class="muted">{{item.specification}}</text>
+            <text wx:if="{{item.reviewState==='rectify' && item.rejectionReason}}" class="product-rejection">退回原因：{{item.rejectionReason}}</text>
+          </view>
+          <text wx:if="{{item.reviewState==='qualified'}}" class="qualified-product-badge">✓ 已合格</text>
+          <view class="product-chevron {{expandedProducts[item.id]?'expanded':''}}"></view>
+        </view>
+
+        <view wx:if="{{expandedProducts[item.id]}}" class="product-detail">
+          <text wx:if="{{item.instructions}}" class="instructions">{{item.instructions}}</text>
+          <view class="photo-title-row">
+            <text class="photo-label">上样图片</text>
+            <text class="photo-requirement">{{item.photoHint}}</text>
+          </view>
+          <text wx:if="{{item.validationError}}" class="validation-error">{{item.validationError}}</text>
+          <view class="photos">
+            <view wx:for="{{values[item.id]}}" wx:for-item="photo" wx:for-index="photoIndex" wx:key="*this" class="photo">
+              <image src="{{photo}}" mode="aspectFill" data-id="{{item.id}}" data-index="{{photoIndex}}" bindtap="previewImage"/>
+              <text wx:if="{{!readOnly && item.editable}}" data-id="{{item.id}}" data-index="{{photoIndex}}" bindtap="removeImage">×</text>
+            </view>
+            <view wx:if="{{!readOnly && item.editable && item.canAdd}}" class="add-photo" data-id="{{item.id}}" bindtap="chooseImage">
+              <text class="add-photo-plus">＋</text>
+              <text class="add-photo-text">{{uploading[item.id]?'上传中':'上传照片'}}</text>
+            </view>
+          </view>
+        </view>
+      </view>
+    </scroll-view>
+  </view>
+
+  <view wx:if="{{!readOnly}}" class="fixed-footer">
+    <button class="primary-button" disabled="{{saving}}" bindtap="save">{{saving?'保存中…':'保存'}}</button>
+  </view>
+
+  <view wx:if="{{autoSaveNotice.visible}}" class="autosave-notice autosave-{{autoSaveNotice.status}}">
+    <view class="autosave-symbol">
+      <view wx:if="{{autoSaveNotice.status==='saving'}}" class="autosave-spinner"></view>
+      <text wx:elif="{{autoSaveNotice.status==='saved'}}">✓</text>
+      <text wx:else>!</text>
+    </view>
+    <view class="autosave-copy">
+      <text class="autosave-title">{{autoSaveNotice.title}}</text>
+      <text wx:if="{{autoSaveNotice.message}}" class="autosave-message">{{autoSaveNotice.message}}</text>
+    </view>
+  </view>
+
+  <operation-progress visible="{{operationProgress.visible}}" status="{{operationProgress.status}}" title="{{operationProgress.title}}" message="{{operationProgress.message}}" hint="{{operationProgress.hint}}" elapsed-text="{{operationProgress.elapsedText}}" stage-text="{{operationProgress.stageText}}"/>
+
+  <view wx:if="{{saveAlert.visible}}" class="save-alert-mask" catchtouchmove="noop">
+    <view class="save-alert-panel" catchtap="noop">
+      <view class="save-alert-head">
+        <view class="save-alert-symbol">!</view>
+        <view class="save-alert-heading">
+          <text class="save-alert-title">{{saveAlert.title}}</text>
+          <text class="save-alert-summary">{{saveAlert.summary}}</text>
+        </view>
+      </view>
+      <scroll-view class="save-alert-content" scroll-y>
+        <text wx:if="{{saveAlert.message}}" class="save-alert-message">{{saveAlert.message}}</text>
+        <view wx:if="{{saveAlert.items.length}}" class="save-alert-list">
+          <view wx:for="{{saveAlert.items}}" wx:key="*this" class="save-alert-item">
+            <text class="save-alert-index">{{index+1}}</text>
+            <text class="save-alert-item-text">{{item}}</text>
+          </view>
+        </view>
+      </scroll-view>
+      <view class="save-alert-actions">
+        <button class="save-alert-secondary" bindtap="closeSaveAlert">知道了</button>
+        <button wx:if="{{saveAlert.hasTarget}}" class="save-alert-primary" bindtap="goToFirstIssue">去处理</button>
+      </view>
+    </view>
+  </view>
+</view>

@@ -1,0 +1,18 @@
+<view class="page execution-page {{task && task.readOnly ? 'read-only' : ''}}">
+  <view class="safe-top"></view><view class="nav"><view class="nav-back" bindtap="goBack">‹</view><text class="nav-title">{{task && task.readOnly ? '任务详情' : '任务执行'}}</text></view>
+  <view wx:if="{{loading}}" class="loading-card card skeleton"></view>
+  <block wx:elif="{{task}}">
+    <view class="summary card">
+      <view class="summary-cell"><view class="summary-label"><image src="/assets/icons/task-01-stroke-rounded.svg" mode="aspectFit"/><text>任务名称</text></view><text class="summary-value">{{task.name}}</text></view>
+      <view class="summary-cell"><view class="summary-label"><image src="/assets/icons/store-01-stroke-rounded.svg" mode="aspectFit"/><text>任务门店</text></view><text class="summary-value">{{task.storeName}}</text></view>
+      <view class="summary-cell"><view class="summary-label"><image src="/assets/icons/clock-01-stroke-rounded.svg" mode="aspectFit"/><text>任务开始时间</text></view><text class="summary-value">{{task.startText}}</text></view>
+      <view class="summary-cell"><view class="summary-label"><image src="/assets/icons/clock-01-stroke-rounded.svg" mode="aspectFit"/><text>任务截止时间</text></view><text class="summary-value">{{task.deadlineText}}</text></view>
+    </view>
+    <view wx:if="{{task.requiresLocation}}" class="location-card card"><view class="pin"><image class="pin-icon" src="/assets/icons/location-06.png" mode="aspectFit" /></view><view class="location-copy"><text class="location-title">{{task.readOnly ? '签到位置' : '当前位置'}}</text><text class="location-address">{{task.locationDisplay.addressText}}</text><text wx:if="{{task.locationDisplay.distanceText}}" class="location-distance">{{task.locationDisplay.distanceText}}</text><text wx:if="{{task.locationGateLocked}}" class="location-gate-tip">完成定位签到后才可进入任务项</text></view><button class="check-button" loading="{{locating}}" disabled="{{task.readOnly || !task.canCheckIn || locating || task.location.checkedIn}}" bindtap="checkIn">{{task.location.checkedIn ? '已签到' : task.readOnly ? '未签到' : locating ? '定位中' : '签到'}}</button></view>
+    <view class="items-title">任务项（{{task.items.length}}）</view>
+    <view class="item-list card"><view wx:for="{{task.items}}" wx:key="id" class="item-row {{item.entryLocked?'entry-locked':''}}" data-id="{{item.id}}" aria-disabled="{{item.entryLocked}}" bindtap="openItem"><text class="item-no">{{item.number}}</text><text class="item-name">{{item.name}}</text><text wx:if="{{item.entryLocked}}" class="entry-gate">签到后执行</text><text wx:else class="status status-{{item.statusMeta.className}}">{{item.statusMeta.label}}</text><text class="enter">›</text></view></view>
+    <view class="submit-tip {{task.readOnly ? 'readonly-tip' : ''}}"><image src="/assets/icons/task-done-01-stroke-rounded.svg" mode="aspectFit"/><text>{{task.readOnly ? '任务已提交，当前为只读查看' : task.executionNotice || '完成全部必做任务项并提交后，任务才会生效'}}</text></view>
+    <view wx:if="{{!task.readOnly}}" class="fixed-footer"><button class="primary-button" disabled="{{!task.canSubmit || submitting}}" bindtap="submitTask">{{submitting?'提交中…':'提交任务'}}</button></view>
+  </block>
+  <operation-progress visible="{{operationProgress.visible}}" status="{{operationProgress.status}}" title="{{operationProgress.title}}" message="{{operationProgress.message}}" hint="{{operationProgress.hint}}" elapsed-text="{{operationProgress.elapsedText}}" stage-text="{{operationProgress.stageText}}"/>
+</view>

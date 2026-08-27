@@ -1,0 +1,46 @@
+<view class="page home-page">
+  <view class="safe-top"></view>
+  <view class="home-title">鹏程SFA</view>
+  <view class="identity" bindtap="openProfile">
+    <image class="brand-logo" src="/assets/dongpeng-logo.png" mode="aspectFit" />
+    <view class="identity-copy">
+      <text class="identity-name">{{profile.name}}</text>
+      <text class="identity-role">{{profile.roleLabel}}</text>
+    </view>
+    <text class="chevron">›</text>
+  </view>
+
+  <view class="today-card">
+    <view class="today-grid"></view>
+    <view class="today-label"><text></text>今日工作</view>
+    <view class="today-main"><text class="today-number">{{todoTotal}}</text><text>项待处理</text></view>
+    <view class="today-tip">聚焦今天，按时完成每一项工作</view>
+    <view class="today-art">
+      <view class="sheet s1"></view><view class="sheet s2"></view><view class="sheet s3"></view>
+      <view class="clock">✓</view>
+    </view>
+    <view class="metrics-panel">
+      <view class="metric" data-status="pending" bindtap="openMetric"><text>待执行</text><text class="metric-value">{{metrics.pending}}</text></view>
+      <view class="metric" data-status="active" bindtap="openMetric"><text>执行中</text><text class="metric-value orange">{{metrics.active}}</text></view>
+      <view class="metric" data-status="rectify" bindtap="openMetric"><text>待整改</text><text class="metric-value green">{{metrics.rectify}}</text></view>
+      <view class="metric" data-status="completed" bindtap="openMetric"><text>本周完成</text><text class="metric-value">{{metrics.weekCompleted}}</text></view>
+    </view>
+  </view>
+
+  <view class="module-section card">
+    <view class="module-head"><text>日常工作</text></view>
+    <view class="module-grid">
+      <view wx:for="{{modules}}" wx:key="code" class="module-item" data-code="{{item.code}}" data-enabled="{{item.enabled}}" bindtap="openModule">
+        <view class="module-icon tone-{{item.tone}}">{{item.shortName}}</view>
+        <view class="module-copy"><text class="module-name">{{item.name}}</text><text class="module-desc">{{item.description}}</text></view>
+        <text class="module-arrow tone-text-{{item.tone}}">›</text>
+      </view>
+    </view>
+  </view>
+
+  <view class="brand-banner card">
+    <image src="/assets/dongpeng-logo.png" mode="aspectFit" />
+    <view><text class="banner-title">东鹏瓷砖·岩板</text><text class="banner-sub">中国瓷砖·岩板领导品牌</text></view>
+    <view class="banner-shape"></view>
+  </view>
+</view>

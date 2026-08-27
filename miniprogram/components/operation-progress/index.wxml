@@ -1,0 +1,17 @@
+<view wx:if="{{visible}}" class="operation-mask" catchtouchmove="noop">
+  <view class="operation-panel" catchtap="noop">
+    <view class="operation-status operation-status-{{status}}">
+      <view wx:if="{{status==='processing'}}" class="operation-spinner"></view>
+      <view wx:else class="operation-check"></view>
+    </view>
+    <view class="operation-copy">
+      <view class="operation-title-row">
+        <text class="operation-title">{{title}}</text>
+        <text wx:if="{{stageText}}" class="operation-stage">{{stageText}}</text>
+      </view>
+      <text class="operation-message">{{message}}</text>
+      <view wx:if="{{status==='processing'}}" class="operation-track"><view class="operation-track-active"></view></view>
+      <view class="operation-meta"><text wx:if="{{elapsedText}}">{{elapsedText}}</text><text wx:if="{{hint}}">{{hint}}</text></view>
+    </view>
+  </view>
+</view>

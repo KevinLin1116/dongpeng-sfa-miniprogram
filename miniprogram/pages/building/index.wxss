@@ -1,0 +1,1 @@
+.building{margin-top:120rpx;padding:70rpx 40rpx;text-align:center}.building>view{font-size:100rpx;color:var(--dp-red)}.building>text{display:block}.building>text:nth-child(2){font-size:34rpx;font-weight:600;margin:30rpx 0 16rpx}.building>text:nth-child(3){color:#909399}.building button{margin-top:50rpx;width:100%;border:0}

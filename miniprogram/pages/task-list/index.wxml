@@ -1,0 +1,24 @@
+<view class="page">
+  <view class="safe-top"></view><view class="nav"><view class="nav-back" bindtap="goBack">‹</view><text class="nav-title">门店任务</text></view>
+  <view class="search-row"><view class="search-box"><text>⌕</text><input value="{{keyword}}" bindinput="onKeyword" placeholder="搜索任务名称、门店、门店编码" /></view><view class="sort-button" bindtap="openSort" aria-role="button" aria-label="任务排序"><image src="/assets/icons/sorting-01-stroke-rounded.svg" mode="aspectFit" /></view></view>
+  <view class="tabs"><view wx:for="{{tabs}}" wx:key="key" class="tab {{activeStatus===item.key?'active':''}}" data-key="{{item.key}}" bindtap="changeStatus">{{item.label}}</view></view>
+  <view wx:if="{{loading}}"><view wx:for="{{[1,2,3]}}" wx:key="*this" class="task-card card skeleton"></view></view>
+  <view wx:else>
+    <view wx:for="{{shownTasks}}" wx:key="id" class="task-card card" data-id="{{item.id}}" bindtap="openTask">
+      <view class="task-head"><view class="task-mark">店</view><text class="task-name">{{item.name}}</text><text class="status status-{{item.statusMeta.className}}">{{item.statusMeta.label}}</text><text class="enter">›</text></view>
+      <view class="task-info"><text>任务项</text><text>{{item.itemSummary}}</text><text>任务对象</text><text>{{item.storeName}}</text><text>门店编码</text><text>{{item.storeCode}}</text><text>执行时间</text><text>{{item.timeText}}</text><text>执行人</text><text>{{item.executorNames}}</text></view>
+      <view class="progress-row"><text>完成进度</text><view class="progress"><view style="width:{{item.progress}}%"></view></view><text class="progress-value">{{item.progress}}%</text></view>
+    </view>
+    <view wx:if="{{!shownTasks.length}}" class="empty">当前没有符合条件的门店任务</view>
+  </view>
+  <view wx:if="{{sortVisible}}" class="sort-mask" bindtap="closeSort">
+    <view class="sort-sheet" catchtap="stopPropagation">
+      <view class="sort-sheet-head"><text class="sort-title">任务排序</text><text class="sort-close" bindtap="closeSort">×</text></view>
+      <text class="sort-section-title">排序字段</text>
+      <view class="sort-options"><view wx:for="{{sortFields}}" wx:key="key" class="sort-option {{pendingSortField===item.key?'selected':''}}" data-key="{{item.key}}" bindtap="chooseSortField"><view><text class="sort-option-name">{{item.label}}</text><text class="sort-option-description">{{item.description}}</text></view><view class="sort-radio"><view></view></view></view></view>
+      <text class="sort-section-title direction-title">排序方式</text>
+      <view class="direction-options"><view wx:for="{{sortDirections}}" wx:key="key" class="direction-option {{pendingSortDirection===item.key?'selected':''}}" data-key="{{item.key}}" bindtap="chooseSortDirection">{{item.label}}</view></view>
+      <button class="sort-confirm" bindtap="applySort">确定</button>
+    </view>
+  </view>
+</view>

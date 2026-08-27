@@ -1,0 +1,1 @@
+<view class="page"><view class="safe-top"></view><view class="nav"><view class="nav-back" bindtap="goBack">‹</view><text class="nav-title">功能建设中</text></view><view class="building card"><view>◫</view><text>该任务类型正在建设中</text><text>首期先完成门店任务真实闭环</text><button class="primary-button" bindtap="goBack">返回首页</button></view></view>
