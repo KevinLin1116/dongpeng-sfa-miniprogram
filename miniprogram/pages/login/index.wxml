@@ -1,0 +1,27 @@
+<view class="login-page">
+  <view class="safe-top"></view>
+  <view class="brand-zone">
+    <view class="brand-capsule">
+      <image class="brand-logo" src="/assets/dongpeng-logo.png" mode="aspectFit" />
+      <view class="brand-divider"></view>
+      <view class="brand-name"><text>鹏程</text><text class="brand-sfa">SFA</text></view>
+    </view>
+    <view class="brand-caption">东鹏智巡 · 现场业务协同平台</view>
+  </view>
+  <view class="login-card">
+    <view class="card-accent"></view>
+    <view class="title">{{setupMode ? '注册账号' : '手机号登录'}}</view>
+    <view class="desc">{{loginDescription}}</view>
+    <view wx:if="{{checking}}" class="checking"><view class="spinner"></view><text>正在验证微信身份</text></view>
+    <block wx:else>
+      <view wx:if="{{systemError}}" class="system-error"><text>{{systemError}}</text><text bindtap="checkSession">重新验证</text></view>
+      <view wx:else>
+        <view class="field"><text>手机号</text><input type="number" placeholder="请输入11位手机号" value="{{mobile}}" bindinput="onMobileInput" maxlength="11" /></view>
+        <view class="field"><text>密码</text><view class="password-input"><input placeholder="8位以上，包含字母和数字" value="{{password}}" bindinput="onPasswordInput" password="{{!showPassword}}" maxlength="64" /><text bindtap="togglePassword">{{showPassword ? '隐藏' : '显示'}}</text></view></view>
+        <view wx:if="{{setupMode}}" class="field"><text>确认密码</text><input placeholder="请再次输入密码" value="{{confirmPassword}}" bindinput="onConfirmInput" password="{{!showPassword}}" maxlength="64" /></view>
+        <button class="primary-button login-button" loading="{{submitting}}" disabled="{{submitting}}" bindtap="submit">登录</button>
+      </view>
+    </block>
+  </view>
+  <view class="login-help">首次使用请注册账号；短信验证码和企业微信免登将在后续版本开放。</view>
+</view>

@@ -84,6 +84,7 @@ function memoryDatabase(seed = {}) {
 
   return {
     collection,
+    async runTransaction(work) { return work({ collection }); },
     async createCollection(name) { rows(name); return {}; },
     snapshot(name) { return clone(rows(name)); },
   };
@@ -204,6 +205,7 @@ function baseSeed({ includeTasks = true, includeApprovals = true, accountOverrid
       submitterName: "业务员甲",
     }] : [],
     sfa_runtime_logs: [],
+    sfa_login_sessions: [],
     sfa_idempotency_records: [],
     sfa_cache: [],
   };
@@ -230,7 +232,7 @@ function productionItem() {
   };
 }
 
-function loadApi({ seed, smartSheet = fakeSmartSheet() }) {
+function loadApi({ seed, smartSheet = fakeSmartSheet(), openId = "openid-reviewer" }) {
   const database = memoryDatabase(seed);
   const originalLoad = Module._load;
   const previousEnvironment = {
@@ -244,11 +246,12 @@ function loadApi({ seed, smartSheet = fakeSmartSheet() }) {
   process.env.SFA_SMART_SHEET_DOC_ID = "test-doc";
   delete process.env.SFA_ALLOW_DEV_FIXTURES;
 
+  let currentOpenId = openId;
   const cloud = {
     DYNAMIC_CURRENT_ENV: "test",
     init() {},
     database: () => database,
-    getWXContext: () => ({ OPENID: "openid-reviewer" }),
+    getWXContext: () => ({ OPENID: currentOpenId }),
   };
   class FakeSmartSheetClient { constructor() { return smartSheet; } }
 
@@ -270,7 +273,7 @@ function loadApi({ seed, smartSheet = fakeSmartSheet() }) {
     restoreOne("SFA_SMART_SHEET_DOC_ID", previousEnvironment.docId);
     restoreOne("SFA_ALLOW_DEV_FIXTURES", previousEnvironment.fixtureFlag);
   }
-  return { api, database, smartSheet, restore };
+  return { api, database, smartSheet, setOpenId: (value) => { currentOpenId = value; }, restore };
 }
 
 async function testReviewerCanReadOwnPendingApproval() {
@@ -472,6 +475,118 @@ async function testMissingApprovalItemCannotCompleteParentTask() {
   } finally { harness.restore(); }
 }
 
+async function testLoginInvitationBindsOnlyItsIssuedWecomAccount() {
+  const seed = baseSeed({ includeApprovals: false, accountOverrides: { roles: ["管理员"], dataScope: "all", wecomUserId: "AdminA" } });
+  const harness = loadApi({ seed });
+  try {
+    const created = await harness.api.main({ action: "createLoginInvitation", wecomUserId: "SalesNew", name: "新业务员", role: "业务员", expiresInDays: 7 });
+    assert.strictEqual(created.ok, true);
+    assert.match(created.data.code, /^[A-F0-9]{16}$/);
+    harness.setOpenId("openid-new-sales");
+    const bound = await harness.api.main({ action: "redeemLoginInvitation", wecomUserId: "SalesNew", inviteCode: created.data.code });
+    assert.strictEqual(bound.ok, true);
+    assert.strictEqual(bound.data.profile.userId, "SalesNew");
+    assert.strictEqual(harness.database.snapshot("sfa_account_bindings").filter((entry) => entry.wecomUserId === "SalesNew")[0].openId, "openid-new-sales");
+    assert.strictEqual(harness.database.snapshot("sfa_login_invites")[0].status, "used");
+    harness.setOpenId("openid-other");
+    const reused = await harness.api.main({ action: "redeemLoginInvitation", wecomUserId: "SalesNew", inviteCode: created.data.code });
+    assert.strictEqual(reused.ok, false);
+    assert.strictEqual(reused.code, "LOGIN_INVITE_INVALID");
+  } finally { harness.restore(); }
+}
+
+async function testLoginInviteRejectsAccountIdCaseVariant() {
+  const seed = baseSeed({ includeApprovals: false, accountOverrides: { roles: ["管理员"], dataScope: "all", wecomUserId: "LinWenKai" } });
+  const harness = loadApi({ seed });
+  try {
+    const created = await harness.api.main({ action: "createLoginInvitation", wecomUserId: "linwenkai", name: "林文凯", role: "管理员", expiresInDays: 7 });
+    assert.strictEqual(created.ok, false);
+    assert.strictEqual(created.code, "WECOM_ACCOUNT_ALREADY_BOUND");
+  } finally { harness.restore(); }
+}
+
+async function testExistingBindingCanSetMobilePasswordAndUseSession() {
+  const seed = baseSeed({ includeApprovals: false, accountOverrides: { wecomUserId: "LinWenKai", name: "林文凯", roles: ["管理员"], dataScope: "all" } });
+  const harness = loadApi({ seed });
+  try {
+    const status = await harness.api.main({ action: "getPasswordSetupStatus", authVersion: 2 });
+    assert.strictEqual(status.ok, true);
+    assert.deepStrictEqual({ eligible: status.data.eligible, name: status.data.name }, { eligible: true, name: "林文凯" });
+
+    const setup = await harness.api.main({ action: "setupInitialPassword", authVersion: 2, mobile: "13800138000", password: "SafePass123" });
+    assert.strictEqual(setup.ok, true);
+    assert.match(setup.data.sessionToken, /^[a-f0-9]{64}$/);
+    const stored = harness.database.snapshot("sfa_account_bindings")[0];
+    assert.strictEqual(stored.mobile, "13800138000");
+    assert.strictEqual(stored.password, undefined);
+    assert.notStrictEqual(stored.passwordHash, "SafePass123");
+
+    const bootstrap = await harness.api.main({ action: "bootstrap", authVersion: 2, sessionToken: setup.data.sessionToken });
+    assert.strictEqual(bootstrap.ok, true);
+    assert.strictEqual(bootstrap.data.profile.userId, "LinWenKai");
+  } finally { harness.restore(); }
+}
+
+async function testAdminCanCreatePasswordAccountAndPasswordLoginIsDeviceBound() {
+  const seed = baseSeed({ includeApprovals: false, accountOverrides: { wecomUserId: "AdminA", name: "管理员甲", roles: ["管理员"], dataScope: "all" } });
+  const harness = loadApi({ seed });
+  try {
+    const created = await harness.api.main({ action: "savePasswordAccount", mobile: "13900139000", wecomUserId: "SalesB", name: "业务员乙", password: "SalesPass123", role: "业务员" });
+    assert.strictEqual(created.ok, true);
+    assert.strictEqual(created.data.created, true);
+    const account = harness.database.snapshot("sfa_account_bindings").find((entry) => entry.wecomUserId === "SalesB");
+    assert(account);
+    assert.strictEqual(account.password, undefined);
+    assert.notStrictEqual(account.passwordHash, "SalesPass123");
+
+    harness.setOpenId("openid-sales-b");
+    const wrong = await harness.api.main({ action: "loginWithPassword", authVersion: 2, mobile: "13900139000", password: "WrongPass123" });
+    assert.strictEqual(wrong.ok, false);
+    assert.strictEqual(wrong.code, "LOGIN_FAILED");
+
+    const loggedIn = await harness.api.main({ action: "loginWithPassword", authVersion: 2, mobile: "13900139000", password: "SalesPass123" });
+    assert.strictEqual(loggedIn.ok, true);
+    const ownDevice = await harness.api.main({ action: "bootstrap", authVersion: 2, sessionToken: loggedIn.data.sessionToken });
+    assert.strictEqual(ownDevice.ok, true);
+    assert.strictEqual(ownDevice.data.profile.userId, "SalesB");
+
+    harness.setOpenId("openid-other-device");
+    const otherDevice = await harness.api.main({ action: "bootstrap", authVersion: 2, sessionToken: loggedIn.data.sessionToken });
+    assert.strictEqual(otherDevice.ok, false);
+    assert.strictEqual(otherDevice.code, "SESSION_EXPIRED");
+  } finally { harness.restore(); }
+}
+
+async function testLogoutRevokesPasswordSession() {
+  const seed = baseSeed({ includeApprovals: false, accountOverrides: { mobile: "13700137000", ...require("../password-auth").passwordFields("LogoutPass123") } });
+  const harness = loadApi({ seed });
+  try {
+    const loggedIn = await harness.api.main({ action: "loginWithPassword", authVersion: 2, mobile: "13700137000", password: "LogoutPass123" });
+    assert.strictEqual(loggedIn.ok, true);
+    const loggedOut = await harness.api.main({ action: "logout", authVersion: 2, sessionToken: loggedIn.data.sessionToken });
+    assert.strictEqual(loggedOut.ok, true);
+    const retried = await harness.api.main({ action: "bootstrap", authVersion: 2, sessionToken: loggedIn.data.sessionToken });
+    assert.strictEqual(retried.ok, false);
+    assert.strictEqual(retried.code, "SESSION_EXPIRED");
+  } finally { harness.restore(); }
+}
+
+async function testAdminPasswordResetRevokesPreviousSessions() {
+  const seed = baseSeed({ includeApprovals: false, accountOverrides: { mobile: "13600136000", roles: ["管理员"], dataScope: "all", ...require("../password-auth").passwordFields("BeforeReset123") } });
+  const harness = loadApi({ seed });
+  try {
+    const loggedIn = await harness.api.main({ action: "loginWithPassword", authVersion: 2, mobile: "13600136000", password: "BeforeReset123" });
+    assert.strictEqual(loggedIn.ok, true);
+    const reset = await harness.api.main({ action: "savePasswordAccount", authVersion: 2, sessionToken: loggedIn.data.sessionToken, mobile: "13600136000", wecomUserId: "ReviewerA", name: "审核人甲", password: "AfterReset123", role: "管理员" });
+    assert.strictEqual(reset.ok, true);
+    const stale = await harness.api.main({ action: "bootstrap", authVersion: 2, sessionToken: loggedIn.data.sessionToken });
+    assert.strictEqual(stale.ok, false);
+    assert.strictEqual(stale.code, "SESSION_EXPIRED");
+    const fresh = await harness.api.main({ action: "loginWithPassword", authVersion: 2, mobile: "13600136000", password: "AfterReset123" });
+    assert.strictEqual(fresh.ok, true);
+  } finally { harness.restore(); }
+}
+
 async function main() {
   const tests = [
     testReviewerCanReadOwnPendingApproval,
@@ -486,6 +601,12 @@ async function main() {
     testCompletedRectificationItemCanBeSubmittedAgain,
     testCompletedTaskFormsAreReadOnly,
     testMissingApprovalItemCannotCompleteParentTask,
+    testLoginInvitationBindsOnlyItsIssuedWecomAccount,
+    testLoginInviteRejectsAccountIdCaseVariant,
+    testExistingBindingCanSetMobilePasswordAndUseSession,
+    testAdminCanCreatePasswordAccountAndPasswordLoginIsDeviceBound,
+    testLogoutRevokesPasswordSession,
+    testAdminPasswordResetRevokesPreviousSessions,
   ];
   const failures = [];
   for (const test of tests) {

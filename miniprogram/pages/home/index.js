@@ -3,7 +3,7 @@ const { call } = require("../../utils/api");
 Page({
   data: {
     loading: true,
-    profile: { name: "林文凯", roleLabel: "管理员" },
+    profile: { name: "", roleLabel: "" },
     metrics: { pending: 0, active: 0, rectify: 0, weekCompleted: 0 },
     modules: [],
   },

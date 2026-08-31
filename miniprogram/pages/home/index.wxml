@@ -1,7 +1,7 @@
 <view class="page home-page">
   <view class="safe-top"></view>
   <view class="home-title">鹏程SFA</view>
-  <view class="identity" bindtap="openProfile">
+  <view wx:if="{{!loading}}" class="identity" bindtap="openProfile">
     <image class="brand-logo" src="/assets/dongpeng-logo.png" mode="aspectFit" />
     <view class="identity-copy">
       <text class="identity-name">{{profile.name}}</text>
@@ -9,6 +9,8 @@
     </view>
     <text class="chevron">›</text>
   </view>
+
+  <view wx:else class="identity identity-loading"><view class="identity-placeholder skeleton"></view></view>
 
   <view class="today-card">
     <view class="today-grid"></view>

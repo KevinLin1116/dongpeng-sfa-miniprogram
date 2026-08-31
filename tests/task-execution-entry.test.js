@@ -17,7 +17,7 @@ require(path.resolve(__dirname, "../miniprogram/pages/task-execution/index.js"))
 
 const source = fs.readFileSync(path.resolve(__dirname, "../miniprogram/pages/task-execution/index.js"), "utf8");
 assert.doesNotMatch(source, /onLoad\(query\)[\s\S]{0,160}checkIn\(true\)/, "进入考勤任务页不能自动签到");
-assert.match(source, /await this\.load\(true\);[\s\S]{0,180}task\.taskType === "ATTENDANCE_CHECK"[\s\S]{0,120}openFirstIncompleteAttendanceItem/, "考勤签到成功后必须自动进入第一个任务项");
+assert.match(source, /await this\.load\(true\);[\s\S]{0,220}\["ATTENDANCE_CHECK", "DAILY_ATTENDANCE"\]\.includes\(task\.taskType\)[\s\S]{0,120}openFirstIncompleteAttendanceItem/, "考勤签到成功后必须自动进入第一个任务项");
 
 function context(task) {
   const pageContext = {

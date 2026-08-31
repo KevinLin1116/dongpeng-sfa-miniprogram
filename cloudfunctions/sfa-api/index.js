@@ -1,5 +1,6 @@
 const cloud = require("wx-server-sdk");
 const crypto = require("crypto");
+const { normalizeMobile, passwordFields, verifyPassword, createSessionCredential, hashSessionToken } = require("./password-auth");
 const { distanceMeters } = require("./location");
 const { reverseGeocode } = require("./reverse-geocoder");
 const { SmartSheetClient, sheetId, sheetTitle, cellText, cellBoolean, cellReferences, cellUsers, textCell } = require("./wecom");
@@ -35,7 +36,7 @@ const { migrateDailyAttendanceStructure } = require("./daily-attendance-migratio
 
 cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 const db = cloud.database();
-const COLLECTIONS = { accounts: "sfa_account_bindings", tasks: "sfa_task_instances", drafts: "sfa_task_drafts", logs: "sfa_runtime_logs", approvals: "sfa_approvals", idempotency: "sfa_idempotency_records", cache: "sfa_cache", uploads: "sfa_upload_metadata" };
+const COLLECTIONS = { accounts: "sfa_account_bindings", loginInvites: "sfa_login_invites", loginSessions: "sfa_login_sessions", tasks: "sfa_task_instances", drafts: "sfa_task_drafts", logs: "sfa_runtime_logs", approvals: "sfa_approvals", idempotency: "sfa_idempotency_records", cache: "sfa_cache", uploads: "sfa_upload_metadata" };
 const DAILY_STRUCTURE_MIGRATION_CACHE_ID = "migration:daily-attendance-structure:v2";
 const DAILY_STRUCTURE_AUDIT_CACHE_ID = "audit:daily-attendance-structure:v2";
 const DAILY_CONFIGURATION_AUDIT_CACHE_ID = "audit:daily-attendance-configuration:v1";
@@ -275,7 +276,7 @@ async function resolveTaskItemForm(item) {
   return formFromSchema(item, schema);
 }
 
-async function authenticate() {
+async function authenticateLegacyOpenId() {
   const { OPENID } = cloud.getWXContext();
   if (!OPENID) throw new ApiError("UNAUTHENTICATED", "未获取到小程序身份");
   let bindings;
@@ -286,6 +287,162 @@ async function authenticate() {
   }
   if (bindings[0]) return bindings[0];
   throw new ApiError("ACCOUNT_NOT_BOUND", "当前微信账号尚未绑定企业微信人员，请联系管理员");
+}
+
+async function authenticate(event = {}) {
+  if (Number(event.authVersion || 1) < 2) return authenticateLegacyOpenId();
+  const token = String(event.sessionToken || "");
+  if (!/^[a-f0-9]{64}$/.test(token)) throw new ApiError("SESSION_REQUIRED", "请先使用手机号登录");
+  const tokenHash = hashSessionToken(token);
+  const session = await readDocument(COLLECTIONS.loginSessions, `session_${tokenHash.slice(0, 40)}`);
+  const { OPENID } = cloud.getWXContext();
+  const expiresAt = Date.parse(session?.expiresAt || "");
+  if (!session || session.status !== "active" || session.tokenHash !== tokenHash || session.openId !== OPENID || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+    throw new ApiError("SESSION_EXPIRED", "登录已失效，请重新登录");
+  }
+  const account = await readDocument(COLLECTIONS.accounts, session.accountId);
+  if (!account || account.status !== "active") throw new ApiError("ACCOUNT_DISABLED", "账号已停用，请联系管理员");
+  return account;
+}
+
+async function activeAccountByMobile(mobile) {
+  const records = await strictQuery(COLLECTIONS.accounts, { mobile, status: "active" }, 2);
+  return records[0] || null;
+}
+
+async function createLoginSession(account) {
+  const { OPENID } = cloud.getWXContext();
+  if (!OPENID) throw new ApiError("UNAUTHENTICATED", "未获取到微信身份，请退出小程序后重试");
+  const credential = createSessionCredential();
+  const session = {
+    _id: `session_${credential.tokenHash.slice(0, 40)}`,
+    tokenHash: credential.tokenHash,
+    accountId: account._id,
+    openId: OPENID,
+    status: "active",
+    createdAt: now(),
+    expiresAt: credential.expiresAt,
+  };
+  const saved = await tryAdd(COLLECTIONS.loginSessions, session);
+  if (!saved) throw new ApiError("SESSION_CREATE_FAILED", "登录会话创建失败，请重试");
+  return { sessionToken: credential.token, expiresAt: credential.expiresAt, profile: publicProfile(account) };
+}
+
+async function revokeAccountSessions(accountId, reason) {
+  const sessions = await queryAll(COLLECTIONS.loginSessions, { accountId, status: "active" }, 5000);
+  const results = await Promise.all(sessions.map((session) => tryUpdate(COLLECTIONS.loginSessions, session._id, { status: "revoked", revokedAt: now(), revokeReason: reason })));
+  if (results.some((result) => !result)) throw new ApiError("SESSION_REVOKE_FAILED", "旧登录会话清理失败，请重试");
+}
+
+async function passwordSetupStatus() {
+  const { OPENID } = cloud.getWXContext();
+  if (!OPENID) return { eligible: false };
+  const bindings = await strictQuery(COLLECTIONS.accounts, { openId: OPENID, status: "active" }, 2);
+  const account = bindings[0];
+  return account && !account.passwordHash
+    ? { eligible: true, name: account.name, userId: account.wecomUserId, mobile: account.mobile || "" }
+    : { eligible: false };
+}
+
+async function setupInitialPassword(event) {
+  const status = await passwordSetupStatus();
+  if (!status.eligible) throw new ApiError("PASSWORD_SETUP_NOT_ALLOWED", "当前账号不能通过首次设置入口修改密码");
+  const mobile = normalizeMobile(event.mobile);
+  const duplicate = await activeAccountByMobile(mobile);
+  const { OPENID } = cloud.getWXContext();
+  const bindings = await strictQuery(COLLECTIONS.accounts, { openId: OPENID, status: "active" }, 2);
+  const account = bindings[0];
+  if (duplicate && duplicate._id !== account._id) throw new ApiError("MOBILE_ALREADY_USED", "该手机号已绑定其他账号");
+  const saved = await tryUpdate(COLLECTIONS.accounts, account._id, { mobile, ...passwordFields(event.password), passwordSetupMode: "openid-migration", updatedAt: now() });
+  if (!saved) throw new ApiError("PASSWORD_SETUP_FAILED", "手机号和密码保存失败，请重试");
+  return createLoginSession({ ...account, mobile });
+}
+
+async function loginWithPassword(event) {
+  const mobile = normalizeMobile(event.mobile);
+  const account = await activeAccountByMobile(mobile);
+  const locked = account?.loginLockedUntil && Date.parse(account.loginLockedUntil) > Date.now();
+  if (!account || locked || !verifyPassword(event.password, account)) {
+    if (account && !locked) {
+      const failedLoginCount = Number(account.failedLoginCount || 0) + 1;
+      await tryUpdate(COLLECTIONS.accounts, account._id, { failedLoginCount, loginLockedUntil: failedLoginCount >= 5 ? new Date(Date.now() + 15 * 60 * 1000).toISOString() : "", lastFailedLoginAt: now() });
+    }
+    throw new ApiError("LOGIN_FAILED", "手机号或密码不正确；连续失败5次将锁定15分钟");
+  }
+  await tryUpdate(COLLECTIONS.accounts, account._id, { failedLoginCount: 0, loginLockedUntil: "", lastLoginAt: now() });
+  return createLoginSession(account);
+}
+
+function inviteCodeHash(code) {
+  return crypto.createHash("sha256").update(String(code || "").trim().toUpperCase()).digest("hex");
+}
+
+function normalizeWecomUserId(value) {
+  return String(value || "").trim();
+}
+
+function wecomUserIdKey(value) {
+  return normalizeWecomUserId(value).toLowerCase();
+}
+
+async function findActiveAccountByWecomUserId(wecomUserId) {
+  const target = wecomUserIdKey(wecomUserId);
+  const accounts = await queryAll(COLLECTIONS.accounts, { status: "active" }, 5000);
+  return accounts.find((account) => wecomUserIdKey(account.wecomUserId) === target) || null;
+}
+
+function assertLoginInviteInput(event) {
+  const wecomUserId = normalizeWecomUserId(event.wecomUserId);
+  const name = String(event.name || "").trim();
+  const role = String(event.role || "业务员").trim();
+  const dataScope = String(event.dataScope || "self").trim();
+  const expiresInDays = Math.max(1, Math.min(30, Number(event.expiresInDays || 7)));
+  if (!/^[a-zA-Z0-9_@.\-]{2,128}$/.test(wecomUserId)) throw new ApiError("LOGIN_INVITE_USER_ID_INVALID", "请输入正确的企业微信账号");
+  if (!name || name.length > 60) throw new ApiError("LOGIN_INVITE_NAME_INVALID", "请输入人员姓名");
+  if (!["业务员", "任务审核者", "管理员"].includes(role)) throw new ApiError("LOGIN_INVITE_ROLE_INVALID", "请选择正确的人员角色");
+  if (!["self", "all"].includes(dataScope)) throw new ApiError("LOGIN_INVITE_SCOPE_INVALID", "请选择正确的数据权限");
+  return { wecomUserId, name, roles: [role], dataScope, expiresInDays };
+}
+
+function publicProfile(account) {
+  return { name: account.name, roleLabel: account.roles?.[0] || "业务员", userId: account.wecomUserId, mobile: account.mobile || "" };
+}
+
+async function redeemLoginInvitation(event) {
+  const { OPENID } = cloud.getWXContext();
+  if (!OPENID) throw new ApiError("UNAUTHENTICATED", "未获取到微信身份，请退出小程序后重试");
+  const wecomUserId = normalizeWecomUserId(event.wecomUserId);
+  const code = String(event.inviteCode || "").trim().toUpperCase();
+  if (!/^[a-zA-Z0-9_@.\-]{2,128}$/.test(wecomUserId)) throw new ApiError("LOGIN_USER_ID_INVALID", "请输入正确的企业微信账号");
+  if (!/^[A-Z0-9]{12,32}$/.test(code)) throw new ApiError("LOGIN_INVITE_CODE_INVALID", "请输入有效的邀请码");
+  const codeHash = inviteCodeHash(code);
+  const existing = await strictQuery(COLLECTIONS.accounts, { openId: OPENID, status: "active" }, 2);
+  if (existing[0]) return { profile: publicProfile(existing[0]), alreadyBound: true };
+
+  const bound = await db.runTransaction(async (transaction) => {
+    const invites = (await transaction.collection(COLLECTIONS.loginInvites).where({ codeHash, status: "active" }).limit(2).get()).data || [];
+    const invite = invites[0];
+    if (!invite || invite.wecomUserId !== wecomUserId) throw new ApiError("LOGIN_INVITE_INVALID", "企业微信账号或邀请码不正确");
+    if (!invite.expiresAt || Date.parse(invite.expiresAt) <= Date.now()) throw new ApiError("LOGIN_INVITE_EXPIRED", "邀请码已过期，请联系管理员重新生成");
+    const existingUser = (await transaction.collection(COLLECTIONS.accounts).where({ wecomUserId, status: "active" }).limit(2).get()).data || [];
+    if (existingUser[0]) throw new ApiError("WECOM_ACCOUNT_ALREADY_BOUND", "该企业微信账号已绑定其他微信，请联系管理员处理");
+    const account = {
+      _id: `account_${codeHash.slice(0, 24)}`,
+      openId: OPENID,
+      wecomUserId,
+      name: invite.name,
+      roles: Array.isArray(invite.roles) && invite.roles.length ? invite.roles : ["业务员"],
+      dataScope: invite.dataScope === "all" ? "all" : "self",
+      status: "active",
+      boundAt: now(),
+      boundFromInviteId: invite._id,
+    };
+    const consumed = await transaction.collection(COLLECTIONS.loginInvites).where({ _id: invite._id, status: "active", codeHash }).update({ data: { status: "used", usedAt: now(), usedByOpenId: OPENID } });
+    if (Number(consumed?.stats?.updated || 0) !== 1) throw new ApiError("LOGIN_INVITE_ALREADY_USED", "邀请码已被使用，请联系管理员重新生成");
+    await transaction.collection(COLLECTIONS.accounts).add({ data: account });
+    return account;
+  });
+  return { profile: publicProfile(bound), alreadyBound: false };
 }
 
 function visibleTasks(account, tasks) {
@@ -1516,6 +1673,64 @@ async function publishSmartSheetTasks(target = {}) {
 }
 
 const handlers = {
+  async getPasswordSetupStatus() { return passwordSetupStatus(); },
+  async setupInitialPassword(event) { return setupInitialPassword(event); },
+  async loginWithPassword(event) { return loginWithPassword(event); },
+  async logout(event) {
+    const tokenHash = hashSessionToken(event.sessionToken);
+    await tryUpdate(COLLECTIONS.loginSessions, `session_${tokenHash.slice(0, 40)}`, { status: "revoked", revokedAt: now() });
+    return { loggedOut: true };
+  },
+  async savePasswordAccount(event, account) {
+    if (!account.roles.includes("管理员")) throw new ApiError("FORBIDDEN", "只有管理员可以维护登录账号");
+    const mobile = normalizeMobile(event.mobile);
+    const wecomUserId = normalizeWecomUserId(event.wecomUserId);
+    const name = String(event.name || "").trim();
+    const role = String(event.role || "业务员").trim();
+    if (!/^[a-zA-Z0-9_@.\-]{2,128}$/.test(wecomUserId)) throw new ApiError("USER_ID_INVALID", "请输入正确的企业微信账号");
+    if (!name || name.length > 60) throw new ApiError("NAME_INVALID", "请输入人员姓名");
+    if (!["业务员", "任务审核者", "管理员"].includes(role)) throw new ApiError("ROLE_INVALID", "请选择正确的人员角色");
+    const mobileOwner = await activeAccountByMobile(mobile);
+    const userOwner = await findActiveAccountByWecomUserId(wecomUserId);
+    if (mobileOwner && userOwner && mobileOwner._id !== userOwner._id) throw new ApiError("MOBILE_ALREADY_USED", "该手机号已绑定其他账号");
+    if (mobileOwner && !userOwner) throw new ApiError("MOBILE_ALREADY_USED", "该手机号已绑定其他账号");
+    const fields = { mobile, wecomUserId, name, roles: [role], dataScope: role === "管理员" ? "all" : "self", status: "active", ...passwordFields(event.password), passwordSetupMode: userOwner ? "admin-reset" : "admin-create", updatedAt: now() };
+    if (userOwner) {
+      await revokeAccountSessions(userOwner._id, "admin-password-reset");
+      const saved = await tryUpdate(COLLECTIONS.accounts, userOwner._id, fields);
+      if (!saved) throw new ApiError("ACCOUNT_SAVE_FAILED", "账号保存失败，请重试");
+      return { accountId: userOwner._id, created: false, mobile, name, roleLabel: role };
+    }
+    const accountId = `account_${crypto.randomBytes(12).toString("hex")}`;
+    const saved = await tryAdd(COLLECTIONS.accounts, { _id: accountId, ...fields, createdAt: now(), createdBy: account.wecomUserId });
+    if (!saved) throw new ApiError("ACCOUNT_SAVE_FAILED", "账号创建失败，请重试");
+    return { accountId, created: true, mobile, name, roleLabel: role };
+  },
+  async createLoginInvitation(event, account) {
+    if (!account.roles.includes("管理员")) throw new ApiError("FORBIDDEN", "只有管理员可以生成登录邀请码");
+    const input = assertLoginInviteInput(event);
+    const existing = await findActiveAccountByWecomUserId(input.wecomUserId);
+    if (existing) throw new ApiError("WECOM_ACCOUNT_ALREADY_BOUND", "该企业微信账号已经完成绑定，请核对账号大小写");
+    const code = crypto.randomBytes(8).toString("hex").toUpperCase();
+    const createdAt = now();
+    const invite = {
+      _id: `invite_${crypto.randomBytes(12).toString("hex")}`,
+      codeHash: inviteCodeHash(code),
+      codeSuffix: code.slice(-4),
+      wecomUserId: input.wecomUserId,
+      name: input.name,
+      roles: input.roles,
+      dataScope: input.dataScope,
+      status: "active",
+      createdAt,
+      expiresAt: new Date(Date.now() + input.expiresInDays * 24 * 60 * 60 * 1000).toISOString(),
+      createdBy: account.wecomUserId,
+    };
+    const saved = await tryAdd(COLLECTIONS.loginInvites, invite);
+    if (!saved) throw new ApiError("LOGIN_INVITE_CREATE_FAILED", "邀请码生成失败，请稍后重试");
+    return { code, expiresAt: invite.expiresAt, wecomUserId: invite.wecomUserId, name: invite.name, roleLabel: invite.roles[0] };
+  },
+  async redeemLoginInvitation(event) { return redeemLoginInvitation(event); },
   async testSmartSheetConnection(_, account) {
     if (!account.roles.includes("管理员")) throw new ApiError("FORBIDDEN", "只有管理员可以测试智能表格连接");
     if (!smartSheet.configured) throw new ApiError("SMART_SHEET_NOT_CONFIGURED", "云函数尚未配置企业微信智能表格凭证");
@@ -2240,12 +2455,12 @@ const handlers = {
     return completeCreateOnlyOperation(operation, { status: event.decision });
   },
   async getMyStats(_, account) { const tasks = await loadTasks(account); const count = (status) => tasks.filter((task) => task.status === status).length; const completed = count("completed"); return { pending: count("pending"), active: count("active"), rectify: count("rectify"), completed, completionRate: tasks.length ? Math.round(completed * 100 / tasks.length) : 0 }; },
-  async getProfile(_, account) { const pending = await handlers.listApprovals({ status: "pending" }, account); return { profile: { name: account.name, roleLabel: account.roles[0] || "业务员", userId: account.wecomUserId, scopeLabel: account.scopeLabel }, approvalCount: pending.length }; },
+  async getProfile(_, account) { const pending = await handlers.listApprovals({ status: "pending" }, account); return { profile: { name: account.name, roleLabel: account.roles[0] || "业务员", userId: account.wecomUserId, mobile: account.mobile || "", scopeLabel: account.scopeLabel }, approvalCount: pending.length, isAdmin: account.roles.includes("管理员") }; },
 };
 
 exports.main = async (event = {}) => {
   const startedAt = Date.now();
   const action = event.action || (event.Type === "Timer" ? "processAttendanceSchedules" : "");
-  try { const account = callbackSystemAccount(event) || timerSystemAccount(event) || await authenticate(); const handler = handlers[action]; if (!handler) throw new ApiError("ACTION_NOT_FOUND", "不支持的操作"); const data = await handler(event, account); await tryAdd(COLLECTIONS.logs, { action, userId: account.wecomUserId, ok: true, durationMs: Date.now() - startedAt, createdAt: now() }); return ok(data); }
+  try { const handler = handlers[action]; if (!handler) throw new ApiError("ACTION_NOT_FOUND", "不支持的操作"); const publicActions = new Set(["redeemLoginInvitation", "getPasswordSetupStatus", "setupInitialPassword", "loginWithPassword"]); const account = callbackSystemAccount(event) || timerSystemAccount(event) || (publicActions.has(action) ? null : await authenticate(event)); const data = await handler(event, account); await tryAdd(COLLECTIONS.logs, { action, userId: account?.wecomUserId || "LOGIN", ok: true, durationMs: Date.now() - startedAt, createdAt: now() }); return ok(data); }
   catch (error) { await tryAdd(COLLECTIONS.logs, { action, ok: false, code: error.code || "INTERNAL_ERROR", message: error.message, durationMs: Date.now() - startedAt, createdAt: now() }); console.error(error); return fail(error); }
 };

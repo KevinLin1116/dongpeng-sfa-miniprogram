@@ -1,5 +1,6 @@
 {
   "pages": [
+    "pages/login/index",
     "pages/home/index",
     "pages/task-list/index",
     "pages/daily-attendance/index",
@@ -10,7 +11,8 @@
     "pages/approval-detail/index",
     "pages/stats/index",
     "pages/profile/index",
-    "pages/building/index"
+    "pages/building/index",
+    "pages/login-invites/index"
   ],
   "window": {
     "navigationStyle": "custom",
