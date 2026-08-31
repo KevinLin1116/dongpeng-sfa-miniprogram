@@ -4,7 +4,7 @@
   <block wx:elif="{{task}}">
     <view class="summary card">
       <view class="summary-cell"><view class="summary-label"><image src="/assets/icons/task-01-stroke-rounded.svg" mode="aspectFit"/><text>任务名称</text></view><text class="summary-value">{{task.name}}</text></view>
-      <view class="summary-cell"><view class="summary-label"><image src="/assets/icons/store-01-stroke-rounded.svg" mode="aspectFit"/><text>任务门店</text></view><text class="summary-value">{{task.storeName}}</text></view>
+      <view class="summary-cell"><view class="summary-label"><image src="/assets/icons/store-01-stroke-rounded.svg" mode="aspectFit"/><text>{{task.attendance?'执行人员':'任务门店'}}</text></view><text class="summary-value">{{task.attendance?task.executorNames:task.storeName}}</text></view>
       <view class="summary-cell"><view class="summary-label"><image src="/assets/icons/clock-01-stroke-rounded.svg" mode="aspectFit"/><text>任务开始时间</text></view><text class="summary-value">{{task.startText}}</text></view>
       <view class="summary-cell"><view class="summary-label"><image src="/assets/icons/clock-01-stroke-rounded.svg" mode="aspectFit"/><text>任务截止时间</text></view><text class="summary-value">{{task.deadlineText}}</text></view>
     </view>
@@ -12,7 +12,7 @@
     <view class="items-title">任务项（{{task.items.length}}）</view>
     <view class="item-list card"><view wx:for="{{task.items}}" wx:key="id" class="item-row {{item.entryLocked?'entry-locked':''}}" data-id="{{item.id}}" aria-disabled="{{item.entryLocked}}" bindtap="openItem"><text class="item-no">{{item.number}}</text><text class="item-name">{{item.name}}</text><text wx:if="{{item.entryLocked}}" class="entry-gate">签到后执行</text><text wx:else class="status status-{{item.statusMeta.className}}">{{item.statusMeta.label}}</text><text class="enter">›</text></view></view>
     <view class="submit-tip {{task.readOnly ? 'readonly-tip' : ''}}"><image src="/assets/icons/task-done-01-stroke-rounded.svg" mode="aspectFit"/><text>{{task.readOnly ? '任务已提交，当前为只读查看' : task.executionNotice || '完成全部必做任务项并提交后，任务才会生效'}}</text></view>
-    <view wx:if="{{!task.readOnly}}" class="fixed-footer"><button class="primary-button" disabled="{{!task.canSubmit || submitting}}" bindtap="submitTask">{{submitting?'提交中…':'提交任务'}}</button></view>
+    <view wx:if="{{!task.readOnly}}" class="fixed-footer"><button class="primary-button" disabled="{{!task.canSubmit || submitting}}" bindtap="submitTask">{{submitting?'提交中…':task.attendance?'提交考勤':'提交任务'}}</button></view>
   </block>
   <operation-progress visible="{{operationProgress.visible}}" status="{{operationProgress.status}}" title="{{operationProgress.title}}" message="{{operationProgress.message}}" hint="{{operationProgress.hint}}" elapsed-text="{{operationProgress.elapsedText}}" stage-text="{{operationProgress.stageText}}"/>
 </view>

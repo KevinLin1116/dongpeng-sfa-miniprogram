@@ -26,11 +26,23 @@ Page({
     pendingSortDirection: "asc",
     sortVisible: false,
   },
-  onLoad(query) { this.setData({ activeStatus: query.status || "all" }); },
+  onLoad(query) {
+    this.taskType = query.type || "STORE";
+    const attendance = this.taskType === "ATTENDANCE_CHECK";
+    this.setData({
+      activeStatus: query.status || "all",
+      taskType: this.taskType,
+      attendance,
+      pageTitle: attendance ? "考勤抽查" : "门店任务",
+      searchPlaceholder: attendance ? "搜索考勤任务" : "搜索任务名称、门店、门店编码",
+      emptyText: attendance ? "当前没有符合条件的考勤任务" : "当前没有符合条件的门店任务",
+      ...(attendance ? { tabs: [{ key: "all", label: "全部" }, { key: "not_started", label: "待开始" }, { key: "pending", label: "待执行" }, { key: "active", label: "执行中" }, { key: "completed", label: "已完成" }, { key: "missed", label: "未完成" }] } : {}),
+    });
+  },
   onShow() { this.load(); },
   async load() {
     try {
-      const tasks = await call("listTasks", { taskType: "STORE" }, { silent: true });
+      const tasks = await call("listTasks", { taskType: this.taskType }, { silent: true });
       const normalized = tasks.map((task) => ({ ...task, statusMeta: statusMeta(task.status), timeText: timeRange(task.startAt, task.deadlineAt) }));
       this.setData({ tasks: normalized, loading: false }); this.filter();
     } catch (_) { this.setData({ loading: false }); }
@@ -53,7 +65,7 @@ Page({
   filter() {
     const { tasks, keyword, activeStatus, sortField, sortDirection } = this.data;
     const key = keyword.trim().toLowerCase();
-    const filtered = tasks.filter((task) => (activeStatus === "all" || task.status === activeStatus) && (!key || `${task.name}${task.storeName}${task.storeCode}`.toLowerCase().includes(key)));
+    const filtered = tasks.filter((task) => (activeStatus === "all" || task.status === activeStatus) && (!key || `${task.name}${task.storeName}${task.storeCode}${task.executorNames}`.toLowerCase().includes(key)));
     const shownTasks = sortTasks(filtered, sortField, sortDirection);
     this.setData({ shownTasks });
   },

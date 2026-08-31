@@ -2,6 +2,7 @@
   "pages": [
     "pages/home/index",
     "pages/task-list/index",
+    "pages/daily-attendance/index",
     "pages/task-execution/index",
     "pages/dynamic-form/index",
     "pages/sampling/index",

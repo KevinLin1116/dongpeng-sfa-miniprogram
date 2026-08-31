@@ -30,16 +30,26 @@ function addressFromResponse(payload = {}) {
   return String(result.address || result.formatted_addresses?.recommend || "").trim();
 }
 
+function poiFromResponse(payload = {}) {
+  const result = payload.result || {};
+  const poi = Array.isArray(result.pois) ? result.pois.find((item) => String(item?.id || "").trim()) : undefined;
+  if (!poi) return { poiId: "", poiTitle: "" };
+  return { poiId: String(poi.id).trim(), poiTitle: String(poi.title || poi.address || "").trim() };
+}
+
 async function reverseGeocode(latitude, longitude, options = {}) {
   const key = String(options.key || process.env.SFA_TENCENT_MAP_KEY || "").trim();
   if (!key) return { address: "", resolved: false, reason: "MAP_KEY_MISSING" };
   const url = new URL(ENDPOINT);
   url.searchParams.set("location", `${latitude},${longitude}`);
   url.searchParams.set("key", key);
-  url.searchParams.set("get_poi", "0");
+  // 智能表格定位单元格要求腾讯地图的地点 ID；逆地址解析时一并获取最近 POI。
+  url.searchParams.set("get_poi", "1");
   const payload = await (options.requestJson || requestJson)(url);
   const address = addressFromResponse(payload);
-  return { address, resolved: Boolean(address), reason: address ? "" : "ADDRESS_EMPTY" };
+  const components = payload.result?.address_component || {};
+  const poi = poiFromResponse(payload);
+  return { address, resolved: Boolean(address), reason: address ? "" : "ADDRESS_EMPTY", province: String(components.province || "").trim(), city: String(components.city || "").trim(), district: String(components.district || "").trim(), ...poi };
 }
 
-module.exports = { addressFromResponse, reverseGeocode };
+module.exports = { addressFromResponse, poiFromResponse, reverseGeocode };

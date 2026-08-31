@@ -14,6 +14,7 @@ function runtimeParameters(task = {}) {
     startAt: String(task.startAt || ""),
     deadlineAt: String(task.deadlineAt || ""),
     requiresLocation: task.requiresLocation === true,
+    locationMode: task.locationMode === "record_only" ? "record_only" : "distance",
     allowedDistanceMeters: allowedDistanceMeters(task.allowedDistanceMeters),
     outOfRangePolicy: task.outOfRangePolicy === "block" ? "block" : "warn",
   };
@@ -22,7 +23,7 @@ function runtimeParameters(task = {}) {
 function runtimeParametersFingerprint(instances = []) {
   const normalized = instances
     .map((instance) => ({
-      id: String(instance.id || instance.storeRecordId || ""),
+      id: String(instance.id || instance.targetKey || instance.storeRecordId || ""),
       ...runtimeParameters(instance),
     }))
     .sort((left, right) => left.id.localeCompare(right.id));
@@ -37,6 +38,7 @@ function locationPolicyChanged(current = {}, next = {}) {
   const before = runtimeParameters(current);
   const after = runtimeParameters(next);
   return before.requiresLocation !== after.requiresLocation
+    || before.locationMode !== after.locationMode
     || before.allowedDistanceMeters !== after.allowedDistanceMeters
     || before.outOfRangePolicy !== after.outOfRangePolicy;
 }
@@ -60,6 +62,7 @@ function taskExecutionAccess(task = {}, currentTime = Date.now()) {
   if (!task.location?.checkedIn) {
     return { allowed: false, code: "LOCATION_REQUIRED", message: "请先完成任务签到" };
   }
+  if (task.locationMode === "record_only") return windowAccess;
   const distance = Number(task.location.distanceMeters);
   const allowed = allowedDistanceMeters(task.allowedDistanceMeters);
   if (task.outOfRangePolicy === "block" && Number.isFinite(distance) && distance > allowed) {

@@ -46,10 +46,14 @@ function resultFieldType(fieldConfig) {
   return RESULT_FIELD_TYPES[fieldConfig && fieldConfig.inputType] || "";
 }
 
+function resultFieldTitle(fieldConfig) {
+  return String(fieldConfig?.resultFieldTitle || fieldConfig?.label || "").trim();
+}
+
 function resultFieldDefinition(fieldConfig) {
   const fieldType = resultFieldType(fieldConfig);
   if (!fieldType) throw new Error(`字段“${fieldConfig.label}”的输入类型暂不支持自动建列`);
-  const definition = { field_title: fieldConfig.label, field_type: fieldType };
+  const definition = { field_title: resultFieldTitle(fieldConfig), field_type: fieldType };
   if (fieldType === "FIELD_TYPE_NUMBER") {
     definition.property_number = { decimal_places: 2, use_separate: false };
   } else if (fieldType === "FIELD_TYPE_SINGLE_SELECT") {
@@ -83,23 +87,25 @@ async function ensureResultFields(client, sheet, fields) {
   const seen = new Map();
   for (const fieldConfig of fields) {
     assertConfigurableResultField(fieldConfig);
-    const previousType = seen.get(fieldConfig.label);
+    const resultTitle = resultFieldTitle(fieldConfig);
+    const previousType = seen.get(resultTitle);
     if (previousType && previousType !== fieldConfig.inputType) {
-      throw new Error(`结果表“${title}”字段“${fieldConfig.label}”在表15中配置了互相冲突的输入类型`);
+      throw new Error(`结果表“${title}”字段“${resultTitle}”在表15中配置了互相冲突的输入类型`);
     }
     if (previousType) continue;
-    seen.set(fieldConfig.label, fieldConfig.inputType);
+    seen.set(resultTitle, fieldConfig.inputType);
     uniqueFields.push(fieldConfig);
   }
 
   for (const fieldConfig of uniqueFields) {
-    const existing = byTitle.get(fieldConfig.label);
+    const fieldTitle = resultFieldTitle(fieldConfig);
+    const existing = byTitle.get(fieldTitle);
     if (existing && !isCompatibleResultField(fieldConfig, existing)) {
-      throw new Error(`结果表“${title}”字段“${fieldConfig.label}”类型冲突：表15配置为${resultFieldType(fieldConfig)}，结果表实际为${fieldType(existing) || "未知类型"}`);
+      throw new Error(`结果表“${title}”字段“${fieldTitle}”类型冲突：表15配置为${resultFieldType(fieldConfig)}，结果表实际为${fieldType(existing) || "未知类型"}`);
     }
   }
 
-  const missing = uniqueFields.filter((fieldConfig) => !byTitle.has(fieldConfig.label));
+  const missing = uniqueFields.filter((fieldConfig) => !byTitle.has(resultFieldTitle(fieldConfig)));
   for (let index = 0; index < missing.length; index += 10) {
     const batch = missing.slice(index, index + 10).map(resultFieldDefinition);
     try {
@@ -108,7 +114,7 @@ async function ensureResultFields(client, sheet, fields) {
       // 并发同步可能已由另一请求补齐；回读后仍缺失才继续抛错。
       tableFields = await client.getFields(id);
       byTitle = new Map(tableFields.map((field) => [field.field_title || field.title, field]));
-      const unresolved = missing.slice(index, index + 10).filter((fieldConfig) => !byTitle.has(fieldConfig.label));
+      const unresolved = missing.slice(index, index + 10).filter((fieldConfig) => !byTitle.has(resultFieldTitle(fieldConfig)));
       if (unresolved.length) throw error;
     }
   }
@@ -118,13 +124,14 @@ async function ensureResultFields(client, sheet, fields) {
     byTitle = new Map(tableFields.map((field) => [field.field_title || field.title, field]));
   }
   for (const fieldConfig of uniqueFields) {
-    const existing = byTitle.get(fieldConfig.label);
-    if (!existing) throw new Error(`结果表“${title}”自动新增字段“${fieldConfig.label}”后回读失败`);
+    const fieldTitle = resultFieldTitle(fieldConfig);
+    const existing = byTitle.get(fieldTitle);
+    if (!existing) throw new Error(`结果表“${title}”自动新增字段“${fieldTitle}”后回读失败`);
     if (!isCompatibleResultField(fieldConfig, existing)) {
-      throw new Error(`结果表“${title}”字段“${fieldConfig.label}”类型冲突：表15配置为${resultFieldType(fieldConfig)}，结果表实际为${fieldType(existing) || "未知类型"}`);
+      throw new Error(`结果表“${title}”字段“${fieldTitle}”类型冲突：表15配置为${resultFieldType(fieldConfig)}，结果表实际为${fieldType(existing) || "未知类型"}`);
     }
   }
-  return { fields: tableFields, added: missing.map((fieldConfig) => fieldConfig.label) };
+  return { fields: tableFields, added: missing.map((fieldConfig) => resultFieldTitle(fieldConfig)) };
 }
 
 function schemaHash(fields) {
@@ -251,6 +258,7 @@ module.exports = {
   RESERVED_RESULT_FIELDS,
   normalizeInputType,
   resultFieldDefinition,
+  resultFieldTitle,
   isCompatibleResultField,
   ensureResultFields,
   schemaHash,

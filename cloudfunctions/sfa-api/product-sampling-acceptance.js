@@ -15,7 +15,6 @@ const TITLES = Object.freeze({
   resultDirectory: "02_结果表目录",
   publications: "04_任务发布",
   taskItems: "05_任务项设置",
-  people: "08_人员主档",
   stores: "09_门店主档",
   templates: "17_审批模板",
   nodes: "18_审批节点设置",
@@ -99,7 +98,6 @@ async function prepareProductSamplingAcceptance(client, options = {}) {
   const taskType = findUnique(tables.taskTypes.records, (record) => cellText(record, "类型编码").trim() === "STORE", "门店任务类型");
   const resultDirectory = findUnique(tables.resultDirectory.records, (record) => cellText(record, "结果表名称").trim() === "产品上样结果", "产品上样结果目录");
   const taskItem = findUnique(tables.taskItems.records, (record) => cellText(record, "任务项名称").trim() === "产品上样", "产品上样任务项");
-  const person = findUnique(tables.people.records, (record) => cellText(record, "企业微信账号ID（自动）").trim() === executorUserId, `执行人员${executorUserId}`);
   const store = findUnique(tables.stores.records, (record) => cellText(record, "门店编码").trim() === storeCode, `门店${storeCode}`);
   const template = findUnique(tables.templates.records, (record) => cellText(record, "审批模板编码").trim() === "PRODUCT_SAMPLING" || cellText(record, "审批模板名称").trim() === "产品上样审批", "产品上样审批模板");
   const node = findUnique(tables.nodes.records, (record) => cellText(record, "审批节点名称").trim() === "产品经理审批" && cellReferences(record, "所属审批模板").includes(template.record_id), "产品经理审批节点");
@@ -153,13 +151,13 @@ async function prepareProductSamplingAcceptance(client, options = {}) {
     "开始时间": String(nowMs - 60 * 60 * 1000),
     "截止时间": String(nowMs + 30 * 24 * 60 * 60 * 1000),
     "任务门店": [store.record_id],
-    "执行人员": [person.record_id],
+    "执行人员": [{ user_id: executorUserId }],
     "任务项": [taskItem.record_id],
     "产品规则": [productRule.record_id],
     "需要定位": true,
     "允许距离（米）": 500,
     "超范围处理": selectCell("标记异常"),
-    "发布状态": selectCell("已发布"),
+    "发布状态": selectCell("草稿"),
     "确认发布": true,
   };
   let publicationRecordId = publicationMatches[0]?.record_id;
@@ -197,7 +195,7 @@ async function prepareProductSamplingAcceptance(client, options = {}) {
     nodeRecordId: node.record_id,
     regionRecordId: region.record_id,
     storeRecordId: store.record_id,
-    executorRecordId: person.record_id,
+    executorUserId,
     productRuleRecordId: productRule.record_id,
     verified: true,
   };

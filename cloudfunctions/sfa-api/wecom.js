@@ -23,12 +23,13 @@ function requestJson(url, body, options = {}) {
 }
 
 class SmartSheetClient {
-  constructor({ corpId, secret, docId, proxyUrl, proxySecret }) {
+  constructor({ corpId, secret, docId, proxyUrl, proxySecret, agentId }) {
     this.corpId = corpId;
     this.secret = secret;
     this.docId = docId;
     this.proxyUrl = proxyUrl;
     this.proxySecret = proxySecret;
+    this.agentId = String(agentId || "").trim();
     this.directAgent = DIRECT_HTTPS_AGENT;
     this.pendingSheets = null;
     this.pendingFields = new Map();
@@ -50,7 +51,25 @@ class SmartSheetClient {
     return this.proxyCall("/v1/wecom/request", { url, method: body ? "POST" : "GET", body });
   }
   async token() { if (this.cachedToken && Date.now() < this.tokenExpiresAt) return this.cachedToken; const payload = await this.request(`https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid=${encodeURIComponent(this.corpId)}&corpsecret=${encodeURIComponent(this.secret)}`); if (payload.errcode !== 0) throw new Error(`获取企业微信凭证失败：${payload.errmsg || payload.errcode}`); this.cachedToken = payload.access_token; this.tokenExpiresAt = Date.now() + 6900 * 1000; return this.cachedToken; }
-  async call(endpoint, body) { const accessToken = await this.token(); const payload = await this.request(`https://qyapi.weixin.qq.com/cgi-bin/wedoc/smartsheet/${endpoint}?access_token=${encodeURIComponent(accessToken)}`, body); if (payload.errcode !== 0) { const error = new Error(`智能表格接口失败：${payload.errmsg || payload.errcode}`); error.wecomCode = payload.errcode; error.wecomHint = payload.hint || ""; throw error; } return payload; }
+  async call(endpoint, body) { const accessToken = await this.token(); const payload = await this.request(`https://qyapi.weixin.qq.com/cgi-bin/wedoc/smartsheet/${endpoint}?access_token=${encodeURIComponent(accessToken)}`, body); if (!payload || payload.errcode !== 0) { const error = new Error(`智能表格接口失败：${payload?.errmsg || payload?.message || payload?.errcode || "请求未返回有效结果"}`); error.wecomCode = payload?.errcode; error.wecomHint = payload?.hint || ""; throw error; } return payload; }
+  get messageConfigured() { return this.configured && Boolean(this.agentId); }
+  async sendAppMessage(userIds, content) {
+    const recipients = Array.from(new Set((userIds || []).map((value) => String(value || "").trim()).filter(Boolean)));
+    if (!this.messageConfigured || !recipients.length) return { skipped: true };
+    const accessToken = await this.token();
+    const payload = await this.request(`https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=${encodeURIComponent(accessToken)}`, {
+      touser: recipients.join("|"),
+      msgtype: "text",
+      agentid: Number(this.agentId),
+      text: { content: String(content || "").slice(0, 2000) },
+      safe: 0,
+      enable_id_trans: 0,
+      enable_duplicate_check: 1,
+      duplicate_check_interval: 1800,
+    });
+    if (payload.errcode !== 0) throw new Error(`企业微信应用消息发送失败：${payload.errmsg || payload.errcode}`);
+    return payload;
+  }
   async getSheets(options = {}) {
     const cached = this.sheetCache;
     if (!options.forceRefresh && cached && Date.now() - cached.at < STRUCTURE_CACHE_TTL_MS) return cached.value;

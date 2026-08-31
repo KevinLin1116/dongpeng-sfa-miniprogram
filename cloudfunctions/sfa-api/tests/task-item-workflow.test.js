@@ -24,7 +24,7 @@ function publicationFixture() {
       "开始时间": String(Date.parse("2026-08-12T09:00:00+08:00")),
       "截止时间": String(Date.parse("2026-08-13T18:00:00+08:00")),
       "确认发布": true,
-      "发布状态": select("已发布"),
+      "发布状态": select("草稿"),
       "需要定位": false,
       "超范围处理": select("允许并提示"),
     },
@@ -71,6 +71,13 @@ function buildPlan(executionRecords = []) {
 
 async function testPublisherPlanFeedsExactNByMChildPlan() {
   assert.strictEqual(isConfirmedPublication(publicationFixture()), true);
+  const notConfirmed = publicationFixture();
+  notConfirmed.values["确认发布"] = false;
+  notConfirmed.values["发布状态"] = select("已发布");
+  assert.strictEqual(isConfirmedPublication(notConfirmed), false, "发布状态不能替代人工确认");
+  const confirmedWithSystemFailure = publicationFixture();
+  confirmedWithSystemFailure.values["发布状态"] = select("发布失败");
+  assert.strictEqual(isConfirmedPublication(confirmedWithSystemFailure), true, "确认发布后应允许修正内容并再次触发校验");
   const plan = buildPlan();
   assert.strictEqual(plan.instances.length, 3, "三个门店应产生三个06父执行计划");
   assert(plan.instances.every((instance) => instance.items.length === 2), "每个06计划都应冻结两个任务项");

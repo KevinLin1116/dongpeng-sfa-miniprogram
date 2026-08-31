@@ -1,4 +1,5 @@
 <view class="page form-page {{readOnly?'read-only':''}}"><view class="safe-top"></view><view class="nav"><view class="nav-back" bindtap="goBack">‹</view><text class="nav-title">{{item.name || '任务填写'}}</text></view>
+  <canvas type="2d" id="attendanceWatermarkCanvas" class="watermark-canvas"></canvas>
   <view wx:if="{{loading}}" class="form-card card skeleton"></view>
   <view wx:elif="{{item}}" class="form-card card"><view class="form-head"><view class="section-title">{{item.sectionName || '常规信息填写'}}</view><text>{{item.completedCount}}/{{item.fieldCount}}</text></view>
     <view wx:if="{{readOnly}}" class="readonly-banner">任务已提交，当前仅支持查看</view>

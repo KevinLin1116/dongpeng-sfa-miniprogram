@@ -2,12 +2,12 @@ const cloud = require("wx-server-sdk");
 const crypto = require("crypto");
 const { distanceMeters } = require("./location");
 const { reverseGeocode } = require("./reverse-geocoder");
-const { SmartSheetClient, sheetId, sheetTitle, cellReferences, textCell } = require("./wecom");
+const { SmartSheetClient, sheetId, sheetTitle, cellText, cellBoolean, cellReferences, cellUsers, textCell } = require("./wecom");
 const { syncEnabledSchemas } = require("./schema-sync");
 const { readTaskTypes, mapTaskType } = require("./config-sync");
 const { schemaConfigId, schemaSnapshot, findReadySchema, formFromSchema, sanitizeValues } = require("./task-item-schema");
-const { SHEETS, safeId, isConfirmedPublication, executionRecordValues, buildPublicationPlan } = require("./task-publisher");
-const { preUploadTaskItemImages, syncExecutionRecord, syncTaskItemResult } = require("./smart-sheet-writeback");
+const { SHEETS, safeId, executionTargetKey, isConfirmedPublication, executionRecordValues, buildPublicationPlan } = require("./task-publisher");
+const { preUploadTaskItemImages, syncExecutionRecord, syncTaskItemResult, syncAttendanceCheckInLocation, syncAttendanceResultMetadata } = require("./smart-sheet-writeback");
 const { ensureTaskItemExecutions, itemExecutionKey } = require("./task-item-execution");
 const { loadItemExecutionContract, itemExecutionIdentity, itemExecutionCreateEntry, applyItemExecutionLink, syncTaskItemExecutionRecord } = require("./item-execution-writeback");
 const { SamplingConfigRepository, SAMPLING_SHEETS, SAMPLING_SHEET_ALIASES } = require("./sampling-config");
@@ -28,11 +28,18 @@ const {
   taskWindowAccess,
   taskExecutionAccess,
 } = require("./task-runtime-policy");
+const { ATTENDANCE_TASK_TYPE, attendancePlaceValue, validateAttendanceEvidence, buildAttendanceFollowUp } = require("./attendance");
+const { migrateAttendanceTaskConfiguration } = require("./attendance-config-migration");
+const { DAILY_TASK_TYPE, chinaParts, readDailyConfiguration, activeException, workday, activeConfigurations, buildDailyTask, jurisdictionResult } = require("./daily-attendance");
+const { migrateDailyAttendanceStructure } = require("./daily-attendance-migration");
 
 cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 const db = cloud.database();
-const COLLECTIONS = { accounts: "sfa_account_bindings", tasks: "sfa_task_instances", drafts: "sfa_task_drafts", logs: "sfa_runtime_logs", approvals: "sfa_approvals", locations: "sfa_location_records", idempotency: "sfa_idempotency_records", cache: "sfa_cache", uploads: "sfa_upload_metadata" };
-const smartSheet = new SmartSheetClient({ corpId: process.env.SFA_WECOM_CORP_ID, secret: process.env.SFA_WECOM_SECRET, docId: process.env.SFA_SMART_SHEET_DOC_ID, proxyUrl: process.env.SFA_PROXY_URL, proxySecret: process.env.SFA_PROXY_SECRET });
+const COLLECTIONS = { accounts: "sfa_account_bindings", tasks: "sfa_task_instances", drafts: "sfa_task_drafts", logs: "sfa_runtime_logs", approvals: "sfa_approvals", idempotency: "sfa_idempotency_records", cache: "sfa_cache", uploads: "sfa_upload_metadata" };
+const DAILY_STRUCTURE_MIGRATION_CACHE_ID = "migration:daily-attendance-structure:v2";
+const DAILY_STRUCTURE_AUDIT_CACHE_ID = "audit:daily-attendance-structure:v2";
+const DAILY_CONFIGURATION_AUDIT_CACHE_ID = "audit:daily-attendance-configuration:v1";
+const smartSheet = new SmartSheetClient({ corpId: process.env.SFA_WECOM_CORP_ID, secret: process.env.SFA_WECOM_SECRET, docId: process.env.SFA_SMART_SHEET_DOC_ID, proxyUrl: process.env.SFA_PROXY_URL, proxySecret: process.env.SFA_PROXY_SECRET, agentId: process.env.SFA_WECOM_AGENT_ID });
 const samplingConfigRepository = new SamplingConfigRepository({ client: smartSheet });
 const approvalConfigRepository = new ApprovalConfigRepository({ client: smartSheet });
 const ADMIN_RETRY_CAPABILITY = Symbol("admin-retry-capability");
@@ -85,6 +92,21 @@ function callbackSystemAccount(event) {
     throw new ApiError("UNAUTHENTICATED", "智能表格回调桥接鉴权失败");
   }
   return { system: true, roles: ["管理员"], wecomUserId: "WECOM_CALLBACK", name: "智能表格回调", dataScope: "all" };
+}
+
+function timerSystemAccount(event) {
+  // CloudBase/SCF timer invocations provide Type=Timer and carry the configured
+  // custom argument in Message.  Do not trust a caller-controlled `source`
+  // marker: mini-program callers can construct arbitrary event payloads.
+  const isNativeTimer = event.Type === "Timer";
+  const isLegacyInternalTimer = event.source === "cloudbase-timer";
+  if (!isNativeTimer && !isLegacyInternalTimer) return null;
+  const expected = Buffer.from(String(process.env.SFA_TIMER_SECRET || ""));
+  const provided = Buffer.from(String(event.Message || event.timerSecret || ""));
+  if (!expected.length || expected.length !== provided.length || !crypto.timingSafeEqual(expected, provided)) {
+    throw new ApiError("UNAUTHENTICATED", "考勤定时任务鉴权失败");
+  }
+  return { system: true, roles: ["管理员"], wecomUserId: "CLOUDBASE_TIMER", name: "考勤定时任务", dataScope: "all" };
 }
 
 async function tryQuery(collection, where = {}) {
@@ -295,6 +317,16 @@ async function loadTaskForApproval(approval) {
 }
 
 function taskListItem(task) {
+  const currentTime = Date.now();
+  const startAt = Date.parse(task.startAt || "");
+  const deadlineAt = Date.parse(task.deadlineAt || "");
+  const status = ["completed", "review", "rectify"].includes(task.status)
+    ? task.status
+    : Number.isFinite(startAt) && currentTime < startAt
+      ? "not_started"
+      : Number.isFinite(deadlineAt) && currentTime > deadlineAt
+        ? "missed"
+        : task.status;
   return {
     id: task._id || task.id,
     taskType: task.taskType,
@@ -305,7 +337,14 @@ function taskListItem(task) {
     startAt: task.startAt,
     deadlineAt: task.deadlineAt,
     submittedAt: task.submittedAt || "",
-    status: task.status,
+    checkInAddress: task.location?.address || "",
+    checkedInAt: task.location?.checkedAt || "",
+    status,
+    dailyAttendanceDate: task.dailyAttendanceDate || "",
+    dailyAttendancePeriod: task.dailyAttendancePeriod || "",
+    dailyAttendancePeriodLabel: task.dailyAttendancePeriodLabel || "",
+    dailyJurisdictionStatus: task.dailyJurisdictionStatus || "",
+    dailyJurisdictionReason: task.dailyJurisdictionReason || "",
     progress: task.progress,
     itemSummary: (task.items || []).map((item) => item.name).join("、"),
   };
@@ -345,6 +384,7 @@ async function saveDraft(account, taskId, itemId, values, completed = false, opt
     unlockedAt: rectificationPending ? (records[0]?.unlockedAt || "") : "",
     pendingCompleteOperationId: options.pendingCompleteOperationId || "",
     samplingReview: normalizeSamplingReview(options.samplingReview || records[0]?.samplingReview),
+    attendanceEvidence: options.attendanceEvidence || records[0]?.attendanceEvidence || {},
     updatedBy: account.wecomUserId,
     updatedByName: account.name,
     updatedAt: now(),
@@ -379,6 +419,7 @@ async function saveDraftIfCurrent(account, taskId, itemId, values, completed = f
     unlockedAt: rectificationPending ? (records[0]?.unlockedAt || "") : "",
     pendingCompleteOperationId: options.pendingCompleteOperationId || "",
     samplingReview: normalizeSamplingReview(options.samplingReview || records[0]?.samplingReview),
+    attendanceEvidence: options.attendanceEvidence || records[0]?.attendanceEvidence || {},
     updatedBy: account.wecomUserId,
     updatedByName: account.name,
     updatedAt: now(),
@@ -437,7 +478,7 @@ async function writeBackTaskItem(task, item, draft, account, final = false, opti
   const saved = await tryUpdate(COLLECTIONS.drafts, draft._id, resultLink);
   if (!saved) throw new ApiError("RESULT_LINK_SAVE_FAILED", "执行结果已回写，但本地关联记录保存失败，请重试");
   Object.assign(draft, resultLink);
-  if (options.skipItemExecutionSync) return result;
+  if (options.skipItemExecutionSync || task.taskType === DAILY_TASK_TYPE) return result;
   const itemExecutionStatus = draft.completed ? "completed" : "active";
   const itemExecution = await syncTaskItemExecutionRecord({
     client: smartSheet,
@@ -457,6 +498,34 @@ async function writeBackTaskItem(task, item, draft, account, final = false, opti
     await persistTaskItemExecutionLink(task, item, itemExecution, itemExecutionStatus);
   }
   return result;
+}
+
+async function enrichCheckInLocationPoi(task) {
+  const location = task.location || {};
+  if (!location.checkedIn || String(location.poiId || location.locationId || location.id || "").trim()) return task;
+  const latitude = Number(location.latitude);
+  const longitude = Number(location.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) throw new ApiError("CHECKIN_LOCATION_INVALID", "签到位置缺少有效经纬度，请重新签到");
+  let geocoded;
+  try {
+    geocoded = await reverseGeocode(latitude, longitude, { requestJson: (url) => smartSheet.request(String(url)) });
+  } catch (_) {
+    throw new ApiError("CHECKIN_LOCATION_RESOLVE_FAILED", "签到地点解析失败，请稍后重试");
+  }
+  if (!geocoded.poiId) throw new ApiError("CHECKIN_LOCATION_POI_MISSING", "当前位置未获取到腾讯地图地点信息，请稍后重试");
+  const nextLocation = {
+    ...location,
+    address: geocoded.address || location.address || "",
+    poiId: geocoded.poiId,
+    addressResolved: Boolean(geocoded.address || location.address),
+    addressResolveReason: geocoded.reason || "",
+    province: geocoded.province || location.province || "",
+    city: geocoded.city || location.city || "",
+    district: geocoded.district || location.district || "",
+  };
+  await tryUpdate(COLLECTIONS.tasks, task.id, { location: nextLocation, updatedAt: now() });
+  task.location = nextLocation;
+  return task;
 }
 
 async function writeBackAllTaskResults(task, account, knownDrafts) {
@@ -846,8 +915,8 @@ function validateFields(fields, values) {
   }
 }
 
-async function createPublishedInstance(instance, existingByStore) {
-  const existing = existingByStore.get(instance.storeRecordId);
+async function createPublishedInstance(instance, existingByTarget) {
+  const existing = existingByTarget.get(instance.targetKey || executionTargetKey(instance));
   if (existing) {
     const id = existing._id || existing.id;
     const itemsChanged = (instance.items || []).some((item) => {
@@ -864,6 +933,9 @@ async function createPublishedInstance(instance, existingByStore) {
     }) : instance.items;
     const runtimeMutable = !["review", "completed"].includes(existing.status);
     const executionParametersChanged = runtimeMutable && runtimeParametersChanged(existing, instance);
+    if (existing.taskType === ATTENDANCE_TASK_TYPE && executionParametersChanged && Date.now() >= Date.parse(existing.startAt || "")) {
+      throw new ApiError("ATTENDANCE_RUNTIME_LOCKED", "考勤任务开始后不能从04修改执行参数；如需延期，请在06填写新截止时间、延期原因和延期操作人");
+    }
     const resetLocation = runtimeMutable && locationPolicyChanged(existing, instance);
     const linkChanged = instance.smartSheetExecutionRecordId && existing.smartSheetExecutionRecordId !== instance.smartSheetExecutionRecordId;
     if (linkChanged || itemsChanged || executionParametersChanged) {
@@ -880,27 +952,27 @@ async function createPublishedInstance(instance, existingByStore) {
       if (resetLocation) data.location = {};
       await db.collection(COLLECTIONS.tasks).doc(id).update({ data });
     }
-    return { id, storeRecordId: instance.storeRecordId, created: false, updated: Boolean(linkChanged || itemsChanged || executionParametersChanged) };
+    return { id, targetKey: instance.targetKey || executionTargetKey(instance), created: false, updated: Boolean(linkChanged || itemsChanged || executionParametersChanged) };
   }
   try {
     await db.collection(COLLECTIONS.tasks).add({ data: { ...instance, _id: instance.id } });
-    return { id: instance.id, storeRecordId: instance.storeRecordId, created: true };
+    return { id: instance.id, targetKey: instance.targetKey || executionTargetKey(instance), created: true };
   } catch (error) {
-    if (/exist|duplicate|重复|已存在/i.test(error.message || "")) return { id: instance.id, storeRecordId: instance.storeRecordId, created: false };
+    if (/exist|duplicate|重复|已存在/i.test(error.message || "")) return { id: instance.id, targetKey: instance.targetKey || executionTargetKey(instance), created: false };
     throw error;
   }
 }
 
 function assertPublishedPlanImmutable(instances, existing) {
   if (!existing.length) return;
-  const plannedStores = new Set(instances.map((instance) => instance.storeRecordId));
-  const existingStores = new Set(existing.map((task) => task.storeRecordId));
-  if (plannedStores.size !== existingStores.size || Array.from(plannedStores).some((storeId) => !existingStores.has(storeId))) {
-    throw new ApiError("PUBLISHED_TASK_IMMUTABLE", "任务已生成执行清单，不能再增删任务门店；请新建一条任务发布记录");
+  const plannedTargets = new Set(instances.map((instance) => instance.targetKey || executionTargetKey(instance)));
+  const existingTargets = new Set(existing.map((task) => task.targetKey || executionTargetKey(task)));
+  if (plannedTargets.size !== existingTargets.size || Array.from(plannedTargets).some((targetKey) => !existingTargets.has(targetKey))) {
+    throw new ApiError("PUBLISHED_TASK_IMMUTABLE", "任务已生成执行清单，不能再增删执行对象；请新建一条任务发布记录");
   }
-  const existingByStore = new Map(existing.map((task) => [task.storeRecordId, task]));
+  const existingByTarget = new Map(existing.map((task) => [task.targetKey || executionTargetKey(task), task]));
   for (const instance of instances) {
-    const stored = existingByStore.get(instance.storeRecordId);
+    const stored = existingByTarget.get(instance.targetKey || executionTargetKey(instance));
     const plannedItems = (instance.items || []).map((item) => item.configItemId || item.id).filter(Boolean).sort();
     const storedItems = (stored?.items || []).map((item) => item.configItemId || item.id).filter(Boolean).sort();
     if (plannedItems.length !== storedItems.length || plannedItems.some((itemId, index) => itemId !== storedItems[index])) {
@@ -962,10 +1034,281 @@ async function ensureSmartSheetExecutionRecords(executionSheetId, instances) {
     added.push(...(response.records || []));
   }
   if (added.length !== missing.length || added.some((record) => !record.record_id)) {
-    throw new ApiError("EXECUTION_RECORD_WRITE_FAILED", "06_任务执行新增记录数量与任务门店数量不一致");
+    throw new ApiError("EXECUTION_RECORD_WRITE_FAILED", "06_任务执行新增记录数量与执行对象数量不一致");
   }
   missing.forEach((instance, index) => { instance.smartSheetExecutionRecordId = added[index].record_id; });
   return { created: missing.length, reused: instances.length - missing.length };
+}
+
+async function ensureAttendanceFollowUp(task, submittedAt) {
+  if (task.taskType !== ATTENDANCE_TASK_TYPE || Number(task.attendanceGeneration || 0) > 0) return { created: false, reason: "not_eligible" };
+  const existing = (await queryAll(COLLECTIONS.tasks, { sourceAttendanceTaskId: task.id }))[0];
+  if (existing) return { created: false, taskId: existing._id || existing.id, reason: "already_created" };
+  const sheets = await smartSheet.getSheets();
+  const byTitle = Object.fromEntries(sheets.map((sheet) => [sheetTitle(sheet), sheet]));
+  const publicationSheet = byTitle[SHEETS.publications];
+  const executionSheet = byTitle[SHEETS.executions];
+  if (!publicationSheet || !executionSheet) throw new ApiError("ATTENDANCE_FOLLOW_UP_STRUCTURE_INVALID", "智能表格缺少04或06子表");
+  const publicationSheetId = sheetId(publicationSheet);
+  const publicationFields = await smartSheet.getFields(publicationSheetId);
+  const publicationFieldTitles = new Set(publicationFields.map((field) => field.field_title));
+  for (const title of ["自动任务唯一键", "自动来源任务"]) {
+    if (!publicationFieldTitles.has(title)) throw new ApiError("ATTENDANCE_FOLLOW_UP_STRUCTURE_INVALID", `04_任务发布缺少字段“${title}”`);
+  }
+  const uniqueKey = `ATTENDANCE_FOLLOW_UP:${task.id}`;
+  let publication = (await smartSheet.getRecords(publicationSheetId)).find((record) => cellText(record, "自动任务唯一键").trim() === uniqueKey);
+  const followUp = buildAttendanceFollowUp(task, submittedAt);
+  if (!publication) {
+    if (!task.taskTypeRecordId || !(task.executorUserIds || []).length) throw new ApiError("ATTENDANCE_FOLLOW_UP_SOURCE_INVALID", "原考勤任务缺少任务类型或企业微信执行人员快照，无法生成复查任务");
+    const values = {
+      "任务名称": textCell(followUp.name),
+      "任务类型": [task.taskTypeRecordId],
+      "执行要求": textCell(task.executionRequirement || "完成定位、正面照片和工作内容填写"),
+      "开始时间": String(Date.parse(followUp.startAt)),
+      "截止时间": String(Date.parse(followUp.deadlineAt)),
+      "执行人员": task.executorUserIds.map((userId) => ({ user_id: userId })),
+      "任务项": (task.items || []).map((item) => item.configItemId || item.id),
+      "需要定位": true,
+      "确认发布": true,
+      "自动任务唯一键": textCell(uniqueKey),
+      "自动来源任务": [task.sourceTaskRecordId],
+    };
+    if (publicationFieldTitles.has("需要审批")) values["需要审批"] = false;
+    if (publicationFieldTitles.has("发布人") && (task.publisherUserIds || []).length) values["发布人"] = task.publisherUserIds.map((userId) => ({ user_id: userId }));
+    if (publicationFieldTitles.has("提醒提前量（分钟）")) values["提醒提前量（分钟）"] = Number(task.reminderLeadMinutes || 15);
+    const response = await smartSheet.addRecords(publicationSheetId, [{ values }]);
+    const recordId = response.records?.[0]?.record_id;
+    if (!recordId) throw new ApiError("ATTENDANCE_FOLLOW_UP_PUBLICATION_FAILED", "自动考勤任务新增后未返回记录ID");
+    publication = { record_id: recordId, values };
+  }
+  followUp.sourceTaskRecordId = publication.record_id;
+  const publicationResult = await publishSmartSheetTasks({ docId: smartSheet.docId, sheetId: publicationSheetId, recordIds: [publication.record_id] });
+  const generated = (await queryAll(COLLECTIONS.tasks, { sourceTaskRecordId: publication.record_id }))
+    .find((candidate) => (candidate.executorUserIds || []).includes(task.executorUserIds?.[0]));
+  if (!generated) throw new ApiError("ATTENDANCE_FOLLOW_UP_GENERATION_FAILED", "自动考勤发布记录已创建，但统一任务发布器未生成执行实例");
+  return { created: true, taskId: generated._id || generated.id, publicationRecordId: publication.record_id, publicationResult };
+}
+
+function smartSheetDate(record, title) {
+  const value = String(cellText(record, title) || "").trim();
+  if (!value) return NaN;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : Date.parse(value);
+}
+
+async function syncAttendanceExecutionChanges(executionSheetId, recordIds = []) {
+  const records = await smartSheet.getRecords(executionSheetId, recordIds.length ? { recordIds } : {});
+  const tasks = await queryAll(COLLECTIONS.tasks, { taskType: ATTENDANCE_TASK_TYPE });
+  const taskByExecutionId = new Map(tasks.filter((task) => task.smartSheetExecutionRecordId).map((task) => [task.smartSheetExecutionRecordId, task]));
+  const updated = [];
+  for (const record of records) {
+    const task = taskByExecutionId.get(record.record_id);
+    if (!task) continue;
+    const nextDeadlineMs = smartSheetDate(record, "截止时间");
+    const currentDeadlineMs = Date.parse(task.deadlineAt || "");
+    if (!Number.isFinite(nextDeadlineMs) || !Number.isFinite(currentDeadlineMs) || nextDeadlineMs === currentDeadlineMs) continue;
+    if (nextDeadlineMs <= Date.parse(task.startAt || "")) throw new ApiError("ATTENDANCE_DEADLINE_INVALID", `考勤任务“${task.name}”的截止时间必须晚于开始时间`);
+    const beforeStart = Date.now() < Date.parse(task.startAt || "");
+    if (!beforeStart && nextDeadlineMs <= currentDeadlineMs) throw new ApiError("ATTENDANCE_EXTENSION_INVALID", `考勤任务“${task.name}”只能延长截止时间，不能缩短`);
+    if (["completed", "review"].includes(task.status)) throw new ApiError("ATTENDANCE_EXTENSION_LOCKED", `考勤任务“${task.name}”已提交，不能延期`);
+    const reason = cellText(record, "延期原因").trim();
+    const operator = cellUsers(record, "延期操作人")[0];
+    if (!beforeStart && (!reason || !operator?.userId)) throw new ApiError("ATTENDANCE_EXTENSION_AUDIT_REQUIRED", `考勤任务“${task.name}”延期时必须填写延期原因和延期操作人`);
+    if (!beforeStart) {
+      const bindings = await strictQuery(COLLECTIONS.accounts, { wecomUserId: operator.userId, status: "active" }, 2);
+      const roles = bindings[0]?.roles || [];
+      const authorized = (task.publisherUserIds || []).includes(operator.userId) || roles.includes("管理员") || roles.some((role) => /考勤/.test(role));
+      if (!authorized) throw new ApiError("ATTENDANCE_EXTENSION_FORBIDDEN", `“${operator.name || operator.userId}”无权延长该考勤任务`);
+    }
+    const nextDeadlineAt = new Date(nextDeadlineMs).toISOString();
+    const status = task.status === "missed" ? (task.location?.checkedIn ? "active" : "pending") : task.status;
+    const history = beforeStart ? (task.extensionHistory || []) : [...(task.extensionHistory || []), { from: task.deadlineAt, to: nextDeadlineAt, reason, operatorUserId: operator.userId, operatorName: operator.name, extendedAt: now() }];
+    const saved = await tryUpdate(COLLECTIONS.tasks, task._id || task.id, { deadlineAt: nextDeadlineAt, status, extensionHistory: history, ...(beforeStart ? {} : { extendedAt: now(), extendedBy: operator.userId, extensionReason: reason }), reminderSentAt: "", updatedAt: now() });
+    if (!saved) throw new ApiError("ATTENDANCE_EXTENSION_SAVE_FAILED", `考勤任务“${task.name}”延期回流失败`);
+    try {
+      if (beforeStart) {
+        updated.push({ taskId: task._id || task.id, deadlineAt: nextDeadlineAt, preStartSync: true });
+        continue;
+      }
+      await smartSheet.sendAppMessage(task.executorUserIds || [], `考勤任务已延期\n任务：${task.name}\n新截止时间：${nextDeadlineAt}\n原因：${reason}`);
+    } catch (error) {
+      await tryAdd(COLLECTIONS.logs, { action: "sendAttendanceExtensionNotice", ok: false, code: "WECOM_MESSAGE_FAILED", taskId: task._id || task.id, createdAt: now() });
+    }
+    updated.push({ taskId: task._id || task.id, deadlineAt: nextDeadlineAt });
+  }
+  return { updated: updated.length, tasks: updated };
+}
+
+async function processAttendanceSchedules(account) {
+  const tasks = await queryAll(COLLECTIONS.tasks, { taskType: ATTENDANCE_TASK_TYPE });
+  const currentTime = Date.now();
+  const result = { scanned: tasks.length, missed: 0, reminded: 0, started: 0, recovered: 0, errors: [] };
+  for (const task of tasks) {
+    const taskId = task._id || task.id;
+    try {
+      if (task.attendanceFollowUpPending && task.attendancePlace === "在路上" && Number(task.attendanceGeneration || 0) === 0) {
+        const followUp = await ensureAttendanceFollowUp({ ...task, id: taskId }, task.submittedAt);
+        await tryUpdate(COLLECTIONS.tasks, taskId, { attendanceFollowUpPending: false, attendanceFollowUpTaskId: followUp.taskId || "", updatedAt: now() });
+        result.recovered += 1;
+      }
+      if (["completed", "review"].includes(task.status)) continue;
+      const startMs = Date.parse(task.startAt || "");
+      const deadlineMs = Date.parse(task.deadlineAt || "");
+      if (Number.isFinite(deadlineMs) && currentTime > deadlineMs) {
+        if (task.status !== "missed") {
+          await tryUpdate(COLLECTIONS.tasks, taskId, { status: "missed", missedAt: now(), updatedAt: now() });
+          await syncExecutionRecord({ client: smartSheet, task, account, status: "missed", progress: { completedCount: task.completedItemCount || 0, requiredCount: task.requiredItemCount || 0 }, approvalStatus: "未完成", touchSavedBy: false });
+          result.missed += 1;
+        }
+        continue;
+      }
+      const leadMs = Number(task.reminderLeadMinutes || 15) * 60 * 1000;
+      if (Number.isFinite(startMs) && currentTime >= startMs - leadMs && currentTime < startMs && !task.startReminderSentAt) {
+        const notice = await smartSheet.sendAppMessage(task.executorUserIds || [], `考勤任务即将开始\n任务：${task.name}\n开始时间：${task.startAt}\n请提前进入东鹏智巡小程序准备。`);
+        if (!notice.skipped) {
+          await tryUpdate(COLLECTIONS.tasks, taskId, { startReminderSentAt: now(), updatedAt: now() });
+          result.reminded += 1;
+        }
+      }
+      if (task.autoGenerated && Number.isFinite(startMs) && currentTime >= startMs && !task.startNoticeSentAt) {
+        const notice = await smartSheet.sendAppMessage(task.executorUserIds || [], `考勤复查任务已开始\n任务：${task.name}\n截止时间：${task.deadlineAt}\n请进入东鹏智巡小程序完成。`);
+        if (!notice.skipped) {
+          await tryUpdate(COLLECTIONS.tasks, taskId, { startNoticeSentAt: now(), updatedAt: now() });
+          result.started += 1;
+        }
+      }
+      if (Number.isFinite(deadlineMs) && currentTime >= deadlineMs - leadMs && !task.reminderSentAt) {
+        const notice = await smartSheet.sendAppMessage(task.executorUserIds || [], `考勤任务即将截止\n任务：${task.name}\n截止时间：${task.deadlineAt}\n请尽快完成。`);
+        if (!notice.skipped) {
+          await tryUpdate(COLLECTIONS.tasks, taskId, { reminderSentAt: now(), updatedAt: now() });
+          result.reminded += 1;
+        }
+      }
+    } catch (error) {
+      result.errors.push({ taskId, code: error.code || "ATTENDANCE_SCHEDULE_FAILED", message: error.message });
+      await tryAdd(COLLECTIONS.logs, { action: "processAttendanceSchedules", ok: false, code: error.code || "ATTENDANCE_SCHEDULE_FAILED", taskId, message: error.message, createdAt: now() });
+    }
+  }
+  return result;
+}
+
+async function processDailyAttendanceSchedules(account) {
+  const date = chinaParts();
+  let configuration;
+  try { configuration = await readDailyConfiguration(smartSheet); }
+  catch (error) { if (error.code === "DAILY_ATTENDANCE_CONFIG_MISSING") return { date, generated: 0, missed: 0, configPending: true }; throw error; }
+  if (!workday(configuration.calendar, date)) return { date, generated: 0, skipped: "non_workday" };
+  const existing = await queryAll(COLLECTIONS.tasks, { taskType: DAILY_TASK_TYPE });
+  let generated = 0;
+  for (const entry of activeConfigurations(configuration.config, date)) {
+    if (configuration.exceptions.some((record) => activeException(record, entry.user.userId, date))) continue;
+    for (const period of require("./daily-attendance").PERIODS) {
+      const task = buildDailyTask({ date, period, config: entry.record, user: entry.user });
+      if (existing.some((item) => item.id === task.id || item._id === task.id)) continue;
+      const added = await tryAdd(COLLECTIONS.tasks, task);
+      if (added) generated += 1;
+    }
+  }
+  const nowMs = Date.now();
+  let missed = 0;
+  for (const task of existing.filter((item) => item.dailyAttendanceDate === date && !["completed", "missed"].includes(item.status))) {
+    if (Date.parse(task.deadlineAt || "") < nowMs) { if (await tryUpdate(COLLECTIONS.tasks, task._id || task.id, { status: "missed", missedAt: now(), updatedAt: now() })) missed += 1; }
+  }
+  return { date, generated, missed };
+}
+
+async function ensureDailyAttendanceStructure() {
+  const previous = await readCache(DAILY_STRUCTURE_MIGRATION_CACHE_ID);
+  if (previous?.status === "completed" || previous?.status === "failed") return previous;
+  try {
+    const result = await migrateDailyAttendanceStructure(smartSheet);
+    await trySet(COLLECTIONS.cache, DAILY_STRUCTURE_MIGRATION_CACHE_ID, { key: DAILY_STRUCTURE_MIGRATION_CACHE_ID, status: "completed", result, completedAt: now() });
+    return { status: "completed", ...result };
+  } catch (error) {
+    await trySet(COLLECTIONS.cache, DAILY_STRUCTURE_MIGRATION_CACHE_ID, { key: DAILY_STRUCTURE_MIGRATION_CACHE_ID, status: "failed", code: error.code || "DAILY_ATTENDANCE_STRUCTURE_FAILED", message: error.message, failedAt: now() });
+    return { status: "failed", code: error.code || "DAILY_ATTENDANCE_STRUCTURE_FAILED", message: error.message };
+  }
+}
+
+// This is intentionally read-only.  It records the workbook that the existing
+// authenticated Smart Sheet adapter actually reaches, so we can distinguish a
+// stale doc mapping from a rejected structural-write request before retrying.
+async function auditDailyAttendanceWorkbook() {
+  const previous = await readCache(DAILY_STRUCTURE_AUDIT_CACHE_ID);
+  if (previous?.status === "completed") return previous;
+  try {
+    const sheets = await smartSheet.getSheets({ forceRefresh: true });
+    const targets = new Set(["13_考勤结果", "25_日常考勤配置", "26_考勤日历", "27_人员考勤例外", "28_人员考勤辖区", "29_日常考勤结果"]);
+    const targetSheets = await Promise.all(sheets
+      .filter((sheet) => targets.has(sheetTitle(sheet)))
+      .map(async (sheet) => {
+        const id = sheetId(sheet);
+        const fields = await smartSheet.getFields(id, { forceRefresh: true });
+        return {
+          title: sheetTitle(sheet),
+          sheetId: id,
+          fields: fields.map((field) => ({ title: field.field_title, type: field.field_type })),
+        };
+      }));
+    const result = {
+      sheetCount: sheets.length,
+      sheetTitles: sheets.map((sheet) => sheetTitle(sheet)).filter(Boolean),
+      targetSheets,
+      auditedAt: now(),
+    };
+    await trySet(COLLECTIONS.cache, DAILY_STRUCTURE_AUDIT_CACHE_ID, { key: DAILY_STRUCTURE_AUDIT_CACHE_ID, status: "completed", result, completedAt: now() });
+    return { status: "completed", result };
+  } catch (error) {
+    const result = { status: "failed", code: error.code || "DAILY_ATTENDANCE_AUDIT_FAILED", message: error.message, failedAt: now() };
+    await trySet(COLLECTIONS.cache, DAILY_STRUCTURE_AUDIT_CACHE_ID, { key: DAILY_STRUCTURE_AUDIT_CACHE_ID, ...result });
+    return result;
+  }
+}
+
+async function auditDailyAttendanceConfiguration() {
+  const previous = await readCache(DAILY_CONFIGURATION_AUDIT_CACHE_ID);
+  if (previous?.status === "completed") return previous;
+  try {
+    const configuration = await readDailyConfiguration(smartSheet);
+    const result = {
+      date: chinaParts(),
+      config: configuration.config.map((record) => ({
+        recordId: record.record_id,
+        userCount: cellUsers(record, "人员").length,
+        users: cellUsers(record, "人员").map((user) => ({ userId: user.userId, name: user.name })),
+        enabled: cellBoolean(record, "是否启用") || cellText(record, "是否启用").trim() === "是",
+        startDate: cellText(record, "生效开始日期"), endDate: cellText(record, "生效结束日期"),
+        morning: `${cellText(record, "上午开始时间")}-${cellText(record, "上午截止时间")}`,
+        afternoon: `${cellText(record, "下午开始时间")}-${cellText(record, "下午截止时间")}`,
+      })),
+      calendar: configuration.calendar.map((record) => ({
+        recordId: record.record_id, date: cellText(record, "日期"),
+        workday: cellBoolean(record, "是否工作日") || cellText(record, "是否工作日").trim() === "是",
+      })),
+      exceptions: configuration.exceptions.map((record) => ({
+        recordId: record.record_id, type: cellText(record, "例外类型"), startDate: cellText(record, "开始日期"), endDate: cellText(record, "结束日期"), userCount: cellUsers(record, "人员").length,
+      })),
+      jurisdictions: configuration.jurisdictions.map((record) => ({ recordId: record.record_id, userCount: cellUsers(record, "人员").length, enabled: cellBoolean(record, "是否启用") || cellText(record, "是否启用").trim() === "是" })),
+      auditedAt: now(),
+    };
+    await trySet(COLLECTIONS.cache, DAILY_CONFIGURATION_AUDIT_CACHE_ID, { key: DAILY_CONFIGURATION_AUDIT_CACHE_ID, status: "completed", result, completedAt: now() });
+    return { status: "completed", result };
+  } catch (error) {
+    const result = { status: "failed", code: error.code || "DAILY_ATTENDANCE_CONFIGURATION_AUDIT_FAILED", message: error.message, failedAt: now() };
+    await trySet(COLLECTIONS.cache, DAILY_CONFIGURATION_AUDIT_CACHE_ID, { key: DAILY_CONFIGURATION_AUDIT_CACHE_ID, ...result });
+    return result;
+  }
+}
+
+function dailyCalendar(tasks, month) {
+  const byDate = new Map();
+  for (const task of tasks) {
+    if (!String(task.dailyAttendanceDate || "").startsWith(month)) continue;
+    const entry = byDate.get(task.dailyAttendanceDate) || { date: task.dailyAttendanceDate, morning: "none", afternoon: "none" };
+    const value = task.status === "missed" ? "missed" : task.dailyJurisdictionStatus === "abnormal" ? "abnormal" : task.status === "completed" ? "normal" : "pending";
+    entry[task.dailyAttendancePeriod] = value; byDate.set(task.dailyAttendanceDate, entry);
+  }
+  return Array.from(byDate.values()).sort((a, b) => a.date.localeCompare(b.date));
 }
 
 async function syncSmartSheetExecutionParameters(executionSheetId, instances) {
@@ -1036,13 +1379,18 @@ async function publishSmartSheetTasks(target = {}) {
       plan.existing = existing;
     } catch (error) {
       const message = `生成失败：${error.message || "未知错误"}`.slice(0, 500);
-      try { await smartSheet.updateRecords(publicationSheetId, [{ record_id: publication.record_id, values: { "发布校验（自动）": textCell(message) } }]); } catch (_) {}
+      try {
+        await smartSheet.updateRecords(publicationSheetId, [{ record_id: publication.record_id, values: {
+          "发布状态": [{ text: "发布失败" }],
+          "发布校验（自动）": textCell(message),
+        } }]);
+      } catch (_) {}
       skipped.push({ sourceTaskRecordId: publication.record_id, reason: "validation_failed", message });
       continue;
     }
-    const existingByStoreForRevision = new Map((plan.existing || []).map((task) => [task.storeRecordId, task]));
+    const existingByTargetForRevision = new Map((plan.existing || []).map((task) => [task.targetKey || executionTargetKey(task), task]));
     const runtimeNeedsSync = plan.instances.some((instance) => {
-      const stored = existingByStoreForRevision.get(instance.storeRecordId);
+      const stored = existingByTargetForRevision.get(instance.targetKey || executionTargetKey(instance));
       return !stored || (!["review", "completed"].includes(stored.status) && runtimeParametersChanged(stored, instance));
     });
     const runtimeRevision = runtimeParametersFingerprint(plan.instances).slice(0, 24);
@@ -1077,10 +1425,16 @@ async function publishSmartSheetTasks(target = {}) {
         continue;
       }
       try {
+        // This is a system-owned lifecycle field.  The user only changes
+        // “确认发布”; status makes the asynchronous progress visible.
+        await smartSheet.updateRecords(publicationSheetId, [{ record_id: publication.record_id, values: {
+          "发布状态": [{ text: "发布中" }],
+          "发布校验（自动）": textCell("正在生成任务清单，请稍候"),
+        } }]);
         const existing = plan.existing || [];
-        const existingByStore = new Map(existing.map((task) => [task.storeRecordId, task]));
+        const existingByTarget = new Map(existing.map((task) => [task.targetKey || executionTargetKey(task), task]));
         const runtimeMutableInstances = plan.instances.filter((instance) => {
-          const stored = existingByStore.get(instance.storeRecordId);
+          const stored = existingByTarget.get(instance.targetKey || executionTargetKey(instance));
           return !stored || !["review", "completed"].includes(stored.status);
         });
         const executionLinkResult = await ensureSmartSheetExecutionRecords(sheetId(byTitle[SHEETS.executions]), plan.instances);
@@ -1104,24 +1458,44 @@ async function publishSmartSheetTasks(target = {}) {
         const knownExecutionRecordIds = new Set(executionRecords.map((record) => record.record_id));
         plan.instances.forEach((instance) => {
           if (knownExecutionRecordIds.has(instance.smartSheetExecutionRecordId)) return;
-          executionRecords.push({ record_id: instance.smartSheetExecutionRecordId, values: { "来源任务": [instance.sourceTaskRecordId], "执行门店": [instance.storeRecordId] } });
+          executionRecords.push({ record_id: instance.smartSheetExecutionRecordId, values: executionRecordValues(instance) });
           knownExecutionRecordIds.add(instance.smartSheetExecutionRecordId);
         });
-        const instanceResults = await mapLimit(plan.instances, 10, (instance) => createPublishedInstance(instance, existingByStore));
+        const instanceResults = await mapLimit(plan.instances, 10, (instance) => createPublishedInstance(instance, existingByTarget));
         const generated = instanceResults.filter((item) => item.created).length;
         const updated = instanceResults.filter((item) => item.updated).length;
         const reused = instanceResults.length - generated;
         const linkedExecutionCount = plan.instances.filter((instance) => instance.smartSheetExecutionRecordId).length;
+        if (plan.taskTypeCode === ATTENDANCE_TASK_TYPE) {
+          await mapWithConcurrency(plan.instances.filter((instance, index) => instanceResults[index]?.created && !instance.autoGenerated), 3, async (instance) => {
+            try {
+              await smartSheet.sendAppMessage(instance.executorUserIds, `考勤抽查任务\n任务：${instance.name}\n开始时间：${instance.startAt}\n截止时间：${instance.deadlineAt}\n请进入东鹏智巡小程序完成。`);
+            } catch (error) {
+              await tryAdd(COLLECTIONS.logs, { action: "sendAttendancePublishedNotice", ok: false, code: "WECOM_MESSAGE_FAILED", taskId: instance.id, createdAt: now() });
+            }
+          });
+        }
         const validationText = updated > 0
           ? `参数同步成功：已更新 ${updated} 条未提交任务的执行时间和定位规则`
           : (linkedExecutionCount === plan.instances.length ? `生成成功：${plan.instances.length} 条任务清单已进入小程序并关联06表` : `小程序已生成 ${plan.instances.length} 条任务清单；06表已关联 ${linkedExecutionCount} 条`);
-        await smartSheet.updateRecords(publicationSheetId, [{ record_id: plan.sourceTaskRecordId, values: { "发布校验（自动）": textCell(validationText), "执行总数（自动）": plan.instances.length, "任务编号（自动）": textCell(plan.taskNumber), "发布时间": String(Date.now()) } }]);
+        await smartSheet.updateRecords(publicationSheetId, [{ record_id: plan.sourceTaskRecordId, values: {
+          "发布状态": [{ text: "已发布" }],
+          "发布校验（自动）": textCell(validationText),
+          "执行总数（自动）": plan.instances.length,
+          "任务编号（自动）": textCell(plan.taskNumber),
+          "发布时间": String(Date.now()),
+        } }]);
         const response = { sourceTaskRecordId: plan.sourceTaskRecordId, taskNumber: plan.taskNumber, generated, updated, reused, instanceCount: instanceResults.length, linkedExecutionCount, executionRecordsCreated: executionLinkResult.created, executionParametersUpdated: executionParameterSync.updated, itemExecutionCount: itemExecutionLinkResult.count, itemExecutionRecordsCreated: itemExecutionLinkResult.created, status: "completed" };
         await completeCreateOnlyOperation(operation, response);
         publicationResults.push(response);
       } catch (error) {
         const message = `生成失败：${error.message || "未知错误"}`.slice(0, 500);
-        try { await smartSheet.updateRecords(publicationSheetId, [{ record_id: publication.record_id, values: { "发布校验（自动）": textCell(message) } }]); } catch (_) {}
+        try {
+          await smartSheet.updateRecords(publicationSheetId, [{ record_id: publication.record_id, values: {
+            "发布状态": [{ text: "发布失败" }],
+            "发布校验（自动）": textCell(message),
+          } }]);
+        } catch (_) {}
         try { await advanceCreateOnlyOperation(operation, "manual_review", { status: "manual_review", message, failedAt: now() }); } catch (_) {}
         publicationResults.push({ sourceTaskRecordId: publication.record_id, status: "failed", message });
       }
@@ -1229,6 +1603,11 @@ const handlers = {
     if (!saved) throw new ApiError("CACHE_WRITE_FAILED", "任务类型已读取，但写入云数据库缓存失败");
     return { modules, count: modules.length, refreshedAt };
   },
+  async migrateAttendanceTaskConfiguration(_, account) {
+    if (!account.roles.includes("管理员")) throw new ApiError("FORBIDDEN", "只有管理员可以补齐考勤任务配置");
+    if (!smartSheet.configured) throw new ApiError("SMART_SHEET_NOT_CONFIGURED", "云函数尚未配置企业微信智能表格凭证");
+    return migrateAttendanceTaskConfiguration(smartSheet);
+  },
   async getWriteQueueStatus(event) {
     const jobIds = Array.isArray(event.jobIds) ? event.jobIds.map(String).filter(Boolean).slice(0, 50) : [];
     if (!jobIds.length) throw new ApiError("JOB_IDS_REQUIRED", "缺少写入任务编号");
@@ -1256,6 +1635,17 @@ const handlers = {
       const changedTitle = changedSheet && sheetTitle(changedSheet);
       const samplingChanged = Object.values(SAMPLING_SHEETS).includes(changedTitle) || Object.values(SAMPLING_SHEET_ALIASES).flat().includes(changedTitle);
       const approvalChanged = Object.values(APPROVAL_SHEETS).includes(changedTitle) && /^((17|18|19|20)_)/.test(changedTitle || "");
+      if (changedTitle === SHEETS.taskTypes) {
+        const modules = await readTaskTypes(smartSheet);
+        const refreshedAt = now();
+        const saved = await trySet(COLLECTIONS.cache, "config_task_types", { key: "config:task-types", value: modules, source: "01_任务类型", refreshedAt });
+        if (!saved) throw new ApiError("CACHE_WRITE_FAILED", "任务类型已读取，但写入云数据库缓存失败");
+        return { ignored: true, reason: "01_任务类型配置已刷新", count: modules.length, refreshedAt };
+      }
+      if (changedTitle === SHEETS.executions) {
+        if (callback.changeType && callback.changeType !== "update_record") return { ignored: true, reason: "06_任务执行仅处理延期更新" };
+        return syncAttendanceExecutionChanges(callback.sheetId, callback.recordIds || event.recordIds || []);
+      }
       if (samplingChanged || approvalChanged) {
         const regionCodeSync = changedTitle === REGION_SHEET_TITLE
           ? await ensureRegionCodes(smartSheet, { recordIds: callback.recordIds || event.recordIds })
@@ -1274,6 +1664,14 @@ const handlers = {
       sheetId: callback.sheetId,
       recordIds: callback.recordIds || event.recordIds,
     });
+  },
+  async processAttendanceSchedules(_, account) {
+    if (!account.system && !account.roles.includes("管理员")) throw new ApiError("FORBIDDEN", "只有系统定时任务或管理员可以处理考勤时效");
+    if (!smartSheet.configured) throw new ApiError("SMART_SHEET_NOT_CONFIGURED", "云函数尚未配置企业微信智能表格凭证");
+    const [audit, configurationAudit] = await Promise.all([auditDailyAttendanceWorkbook(), auditDailyAttendanceConfiguration()]);
+    const structure = await ensureDailyAttendanceStructure();
+    const [attendance, daily] = await Promise.all([processAttendanceSchedules(account), processDailyAttendanceSchedules(account)]);
+    return { attendance, daily, structure, audit, configurationAudit };
   },
   async retryTaskItemExecutionSync(event, account) {
     if (!smartSheet.configured) throw new ApiError("SMART_SHEET_NOT_CONFIGURED", "云函数尚未配置企业微信智能表格凭证");
@@ -1319,6 +1717,24 @@ const handlers = {
     return { profile: { name: account.name, roleLabel: account.roles[0] || "业务员", userId: account.wecomUserId }, metrics: { pending: counts("pending"), active: counts("active"), rectify: counts("rectify"), weekCompleted: counts("completed") }, modules: taskTypeCache?.value || [], config: { taskTypesReady: Boolean(taskTypeCache?.value?.length), taskTypesRefreshedAt: taskTypeCache?.refreshedAt || "" } };
   },
   async listTasks(event, account) { return (await loadTasks(account)).filter((task) => !event.taskType || task.taskType === event.taskType).map(taskListItem); },
+  async getDailyAttendanceCalendar(event, account) {
+    const month = /^\d{4}-\d{2}$/.test(String(event.month || "")) ? String(event.month) : chinaParts().slice(0, 7);
+    const tasks = (await loadTasks(account)).filter((task) => task.taskType === DAILY_TASK_TYPE);
+    const requestedDate = String(event.date || "");
+    const today = chinaParts();
+    const selectedDate = /^\d{4}-\d{2}-\d{2}$/.test(requestedDate) && requestedDate.startsWith(month)
+      ? requestedDate
+      : (today.startsWith(month) ? today : `${month}-01`);
+    const tasksByDate = {};
+    for (const task of tasks) {
+      if (!String(task.dailyAttendanceDate || "").startsWith(month)) continue;
+      const date = task.dailyAttendanceDate;
+      if (!tasksByDate[date]) tasksByDate[date] = [];
+      tasksByDate[date].push(taskListItem(task));
+    }
+    for (const date of Object.keys(tasksByDate)) tasksByDate[date].sort((a, b) => String(a.startAt).localeCompare(String(b.startAt)));
+    return { month, selectedDate, calendar: dailyCalendar(tasks, month), tasksByDate };
+  },
   async getTask(event, account) {
     const task = await loadTask(account, event.taskId); const drafts = await strictQuery(COLLECTIONS.drafts, { taskId: task.id }, 100);
     const items = task.items.map((item) => {
@@ -1345,7 +1761,7 @@ const handlers = {
       canSubmit: required.every((item) => item.status === "completed") && !readOnly && executionAccess.allowed,
     };
   },
-  async getTaskItemForm(event, account) { const task = await loadTask(account, event.taskId); const item = task.items.find((entry) => entry.id === event.itemId); if (!item) throw new ApiError("ITEM_NOT_FOUND", "任务项不存在"); const draft = await loadDraft(account, task.id, item.id); const form = await resolveTaskItemForm(item); const access = taskItemAccess(task, draft); return { item: { ...form, editable: access.editable }, values: sanitizeValues(form.fields, draft.values), readOnly: !access.editable }; },
+  async getTaskItemForm(event, account) { const task = await loadTask(account, event.taskId); const item = task.items.find((entry) => entry.id === event.itemId); if (!item) throw new ApiError("ITEM_NOT_FOUND", "任务项不存在"); const draft = await loadDraft(account, task.id, item.id); const form = await resolveTaskItemForm(item); const access = taskItemAccess(task, draft); return { item: { ...form, editable: access.editable }, values: sanitizeValues(form.fields, draft.values), attendanceEvidence: draft.attendanceEvidence || {}, taskContext: { taskType: task.taskType, employeeName: account.name, location: task.location || {} }, readOnly: !access.editable }; },
   async getSamplingForm(event, account) {
     const task = await loadTask(account, event.taskId);
     const item = task.items.find((entry) => entry.id === event.itemId);
@@ -1375,7 +1791,7 @@ const handlers = {
     const values = item.renderer === "sampling"
       ? validateSamplingEditAccess(item.samplingSnapshot, existingDraft.values || {}, event.values, existingDraft.samplingReview)
       : sanitizeValues(form.fields, event.values);
-    const draft = await saveDraftIfCurrent(account, task.id, item.id, values, false, { allowCompletedOverwrite: true, samplingReview: existingDraft.samplingReview });
+    const draft = await saveDraftIfCurrent(account, task.id, item.id, values, false, { allowCompletedOverwrite: true, samplingReview: existingDraft.samplingReview, attendanceEvidence: event.attendanceEvidence });
     const [taskProgress, imagePreSync] = await Promise.all([
       measurePhase("saveItemDraft", "task_progress", () => refreshTaskProgress(task)),
       item.renderer === "sampling" && event.preSyncImages === true
@@ -1405,6 +1821,7 @@ const handlers = {
       const form = await resolveTaskItemForm(item);
       values = sanitizeValues(form.fields, values);
       validateFields(form.fields, values);
+      if (task.taskType === ATTENDANCE_TASK_TYPE) validateAttendanceEvidence(item, values, event.attendanceEvidence || {});
     }
     const round = Number(existingDraft.completionRound || 0) + 1;
     const operation = await acquireCreateOnlyOperation({
@@ -1415,10 +1832,12 @@ const handlers = {
       input: { taskId: event.taskId, itemId: event.itemId, round, requestId, values: event.values || {}, userId: account.wecomUserId },
     });
     if (operation.kind === "completed") return operation.response;
+    let draft;
     try {
-    const draft = item.renderer === "sampling"
+    draft = item.renderer === "sampling"
       ? await completeSamplingDraft({ task, item, account, values, operation })
-      : await saveDraft(account, task.id, item.id, values, true, { pendingCompleteOperationId: operation.id });
+      : await saveDraft(account, task.id, item.id, values, true, { pendingCompleteOperationId: operation.id, attendanceEvidence: event.attendanceEvidence });
+    if (item.renderer !== "sampling" && task.requiresLocation) await enrichCheckInLocationPoi(task);
     if (item.renderer !== "sampling") await measurePhase("completeTaskItem", "dynamic_result_writeback", () => writeBackTaskItem(task, item, draft, account, false));
     const taskProgress = await measurePhase("completeTaskItem", "task_progress", () => refreshTaskProgress(task));
     await measurePhase("completeTaskItem", "parent_execution_writeback", () => syncExecutionRecord({ client: smartSheet, task, account, status: taskProgress.status, progress: taskProgress, approvalStatus: "待提交" }));
@@ -1427,7 +1846,8 @@ const handlers = {
     if (!draftSaved) throw new ApiError("DRAFT_SAVE_FAILED", "任务项已回写，但完成状态保存失败；请勿重复提交并联系管理员");
     return completeCreateOnlyOperation(operation, response);
     } catch (error) {
-      if (isPreSideEffectError(error) || ["SAMPLING_IMAGE_DOWNLOAD_FAILED", "SAMPLING_IMAGE_UPLOAD_FAILED"].includes(error?.code)) await abandonCreateOnlyOperation(operation);
+      if (draft?._id) await tryUpdate(COLLECTIONS.drafts, draft._id, { completed: false, pendingCompleteOperationId: "", updatedAt: now() });
+      await abandonCreateOnlyOperation(operation);
       throw error;
     }
   },
@@ -1436,22 +1856,50 @@ const handlers = {
     if (task.requiresLocation !== true) throw new ApiError("LOCATION_NOT_REQUIRED", "该任务无需定位签到");
     const windowAccess = taskWindowAccess(task);
     if (!windowAccess.allowed) throw new ApiError(windowAccess.code, windowAccess.message);
-    const distance = distanceMeters(event.latitude, event.longitude, task.storeLocation.latitude, task.storeLocation.longitude);
+    const recordOnly = task.locationMode === "record_only";
+    if (!recordOnly && (!Number.isFinite(Number(task.storeLocation?.latitude)) || !Number.isFinite(Number(task.storeLocation?.longitude)))) {
+      throw new ApiError("LOCATION_REFERENCE_MISSING", "任务门店缺少定位基准，请联系发布者");
+    }
+    const distance = recordOnly ? undefined : distanceMeters(event.latitude, event.longitude, task.storeLocation.latitude, task.storeLocation.longitude);
     const allowed = task.allowedDistanceMeters || 500;
-    if (distance > allowed && task.outOfRangePolicy === "block") throw new ApiError("OUT_OF_RANGE", `距离门店约 ${Math.round(distance)} 米，超过允许范围 ${allowed} 米`);
+    if (!recordOnly && distance > allowed && task.outOfRangePolicy === "block") throw new ApiError("OUT_OF_RANGE", `距离门店约 ${Math.round(distance)} 米，超过允许范围 ${allowed} 米`);
     let geocoded = { address: "", resolved: false, reason: "NOT_REQUESTED" };
-    try { geocoded = await reverseGeocode(event.latitude, event.longitude); }
+    try {
+      geocoded = await reverseGeocode(event.latitude, event.longitude, {
+        // Tencent Map keys may be restricted to the fixed outbound IP.  Reuse
+        // the signed proxy path so reverse geocoding has the same stable egress
+        // as the enterprise-WeChat integration.
+        requestJson: (url) => smartSheet.request(String(url)),
+      });
+    }
     catch (error) {
       geocoded = { address: "", resolved: false, reason: "REVERSE_GEOCODE_FAILED" };
       console.warn("check-in reverse geocode failed", error.message || error);
     }
-    const location = { checkedIn: true, latitude: event.latitude, longitude: event.longitude, accuracy: event.accuracy, distanceMeters: Math.round(distance), address: geocoded.address, addressResolved: geocoded.resolved, addressResolveReason: geocoded.reason, checkedAt: now(), checkedBy: account.wecomUserId };
-    await tryAdd(COLLECTIONS.locations, { taskId: task.id, ...location });
+    let dailyJurisdiction = { status: "pending", reason: "" };
+    if (task.taskType === DAILY_TASK_TYPE) {
+      const configuration = await readDailyConfiguration(smartSheet);
+      dailyJurisdiction = jurisdictionResult(configuration.jurisdictions, account.wecomUserId, geocoded);
+    }
+    const location = { checkedIn: true, latitude: event.latitude, longitude: event.longitude, accuracy: event.accuracy, ...(recordOnly ? {} : { distanceMeters: Math.round(distance) }), address: geocoded.address, poiId: geocoded.poiId || "", addressResolved: geocoded.resolved, addressResolveReason: geocoded.reason, province: geocoded.province || "", city: geocoded.city || "", district: geocoded.district || "", checkedAt: now(), checkedBy: account.wecomUserId };
     const status = task.status === "pending" ? "active" : task.status;
-    const saved = await tryUpdate(COLLECTIONS.tasks, task.id, { location, status, updatedAt: now() });
+    const saved = await tryUpdate(COLLECTIONS.tasks, task.id, { location, status, ...(task.taskType === DAILY_TASK_TYPE ? { dailyJurisdictionStatus: dailyJurisdiction.status, dailyJurisdictionReason: dailyJurisdiction.reason } : {}), updatedAt: now() });
     if (!saved) throw new ApiError("CHECK_IN_SAVE_FAILED", "签到位置保存失败，请重试");
-    await syncExecutionRecord({ client: smartSheet, task, account, status, progress: { completedCount: task.completedItemCount || 0, requiredCount: task.requiredItemCount || (task.items || []).filter((item) => item.required !== false).length }, approvalStatus: "待提交" });
-    return location;
+    let executionSyncPending = false;
+    try {
+      const locationResult = await syncAttendanceCheckInLocation({ client: smartSheet, task: { ...task, location }, account });
+      if (locationResult.recordId) await tryUpdate(COLLECTIONS.tasks, task.id, { locationResultRecordId: locationResult.recordId, locationResultSyncPending: false, updatedAt: now() });
+      await syncExecutionRecord({ client: smartSheet, task, account, status, progress: { completedCount: task.completedItemCount || 0, requiredCount: task.requiredItemCount || (task.items || []).filter((item) => item.required !== false).length }, approvalStatus: "待提交" });
+    } catch (error) {
+      // The attendance record itself has already been durably saved above.  A
+      // temporary 06 write-back fault must not force the salesperson to sign in
+      // again or prevent the required photo/form steps from starting.
+      executionSyncPending = true;
+      await tryUpdate(COLLECTIONS.tasks, task.id, { executionSyncPending: true, locationResultSyncPending: true, updatedAt: now() });
+      await tryAdd(COLLECTIONS.logs, { action: "checkInResultSync", ok: false, code: error.code || "SMART_SHEET_SYNC_FAILED", taskId: task.id, createdAt: now() });
+      console.warn("check-in result sync deferred", error.message || error);
+    }
+    return { ...location, executionSyncPending };
   },
   async retrySamplingSubmission(event, account) {
     if (!account.roles.includes("管理员")) throw new ApiError("FORBIDDEN", "只有管理员可以继续未完成的产品上样提交");
@@ -1496,6 +1944,7 @@ const handlers = {
     const approvalItems = task.items.filter((item) => item.approvalTemplateCode || item.requiresApproval).map((item) => ({ ...item, approvalTemplateCode: item.approvalTemplateCode || (item.approvalTemplateIds || [])[0] || "CONFIGURED_APPROVAL" }));
     const drafts = await strictQuery(COLLECTIONS.drafts, { taskId: task.id }, 100);
     const draftByItem = new Map(drafts.map((draft) => [draft.itemId, draft]));
+    const attendancePlace = task.taskType === ATTENDANCE_TASK_TYPE ? attendancePlaceValue(task.items, drafts) : "";
     for (const item of task.items) {
       const draft = draftByItem.get(item.id);
       if (item.required !== false && !draft?.completed) throw new ApiError("TASK_INCOMPLETE", `请先完成任务项“${item.name}”`);
@@ -1542,6 +1991,21 @@ const handlers = {
           images_ready: async () => ({ samplingItemCount: task.items.filter((item) => item.renderer === "sampling").length }),
           results_ready: async () => {
             await writeBackAllTaskResults(task, account, drafts);
+            if (task.taskType === ATTENDANCE_TASK_TYPE) {
+              try {
+                await syncAttendanceResultMetadata({ client: smartSheet, task, drafts, attendancePlace, account });
+                await tryUpdate(COLLECTIONS.tasks, task.id, { locationResultSyncPending: false, updatedAt: now() });
+              } catch (error) {
+                // Result rows and the submitted attendance must remain durable
+                // even while an administrator is adding the dedicated location
+                // column in 13_考勤结果.  Keep a retriable marker instead of
+                // making the salesperson repeat a completed task.
+                if (error.code !== "ATTENDANCE_RESULT_LOCATION_FIELD_INVALID") throw error;
+                await tryUpdate(COLLECTIONS.tasks, task.id, { locationResultSyncPending: true, updatedAt: now() });
+                await tryAdd(COLLECTIONS.logs, { action: "attendanceLocationResultSync", ok: false, code: error.code, taskId: task.id, createdAt: now() });
+                console.warn("attendance location result sync deferred", error.message || error);
+              }
+            }
             const samplingItems = task.items.filter((entry) => entry.renderer === "sampling");
             const samplingResults = await mapWithConcurrency(samplingItems, 3, async (item) => {
               const draft = draftByItem.get(item.id);
@@ -1646,13 +2110,33 @@ const handlers = {
           },
           parent_state_ready: async () => {
             await syncExecutionRecord({ client: smartSheet, task, account, status, progress, submittedAt, approvalStatus: approvalItems.length ? "待审核" : "无需审批" });
-            const saved = await tryUpdate(COLLECTIONS.tasks, task.id, { status, submissionRound: round, progress: 100, completedItemCount: progress.completedCount, requiredItemCount: progress.requiredCount, submittedAt, submittedBy: account.wecomUserId, latestRejectionReason: "", completedAt: status === "completed" ? submittedAt : "" });
+            const attendanceAbnormal = attendancePlace === "异常:非工作场所";
+            const attendanceFollowUpPending = attendancePlace === "在路上" && Number(task.attendanceGeneration || 0) === 0;
+            const saved = await tryUpdate(COLLECTIONS.tasks, task.id, { status, submissionRound: round, progress: 100, completedItemCount: progress.completedCount, requiredItemCount: progress.requiredCount, submittedAt, submittedBy: account.wecomUserId, latestRejectionReason: "", completedAt: status === "completed" ? submittedAt : "", ...(task.taskType === ATTENDANCE_TASK_TYPE ? { attendancePlace, attendanceAbnormal, attendanceFollowUpPending } : {}) });
             if (!saved) throw new ApiError("TASK_SUBMIT_SAVE_FAILED", "任务提交状态保存失败，请重试");
+            task.status = status;
+            task.submittedAt = submittedAt;
             return { status };
           },
         },
       });
-      return { status, approvalCount: approvalByItem.size };
+      let attendanceAutomation;
+      if (task.taskType === ATTENDANCE_TASK_TYPE && status === "completed") {
+        if (attendancePlace === "在路上" && Number(task.attendanceGeneration || 0) === 0) {
+          try {
+            attendanceAutomation = await ensureAttendanceFollowUp(task, submittedAt);
+            await tryUpdate(COLLECTIONS.tasks, task.id, { attendanceFollowUpPending: false, attendanceFollowUpTaskId: attendanceAutomation.taskId || "", updatedAt: now() });
+          } catch (error) {
+            attendanceAutomation = { created: false, pending: true, code: error.code || "ATTENDANCE_FOLLOW_UP_FAILED" };
+            await tryAdd(COLLECTIONS.logs, { action: "createAttendanceFollowUp", ok: false, code: attendanceAutomation.code, taskId: task.id, message: error.message, createdAt: now() });
+          }
+        }
+        if (attendancePlace === "异常:非工作场所") {
+          try { await smartSheet.sendAppMessage(task.publisherUserIds || [], `考勤异常提醒\n任务：${task.name}\n执行人：${account.name}\n当前所在地：异常:非工作场所\n提交时间：${submittedAt}`); }
+          catch (error) { await tryAdd(COLLECTIONS.logs, { action: "sendAttendanceAbnormalNotice", ok: false, code: "WECOM_MESSAGE_FAILED", taskId: task.id, createdAt: now() }); }
+        }
+      }
+      return { status, approvalCount: approvalByItem.size, ...(attendanceAutomation ? { attendanceAutomation } : {}) };
     });
   },
   async listApprovals(event, account) {
@@ -1761,6 +2245,7 @@ const handlers = {
 
 exports.main = async (event = {}) => {
   const startedAt = Date.now();
-  try { const account = callbackSystemAccount(event) || await authenticate(); const handler = handlers[event.action]; if (!handler) throw new ApiError("ACTION_NOT_FOUND", "不支持的操作"); const data = await handler(event, account); await tryAdd(COLLECTIONS.logs, { action: event.action, userId: account.wecomUserId, ok: true, durationMs: Date.now() - startedAt, createdAt: now() }); return ok(data); }
-  catch (error) { await tryAdd(COLLECTIONS.logs, { action: event.action, ok: false, code: error.code || "INTERNAL_ERROR", message: error.message, durationMs: Date.now() - startedAt, createdAt: now() }); console.error(error); return fail(error); }
+  const action = event.action || (event.Type === "Timer" ? "processAttendanceSchedules" : "");
+  try { const account = callbackSystemAccount(event) || timerSystemAccount(event) || await authenticate(); const handler = handlers[action]; if (!handler) throw new ApiError("ACTION_NOT_FOUND", "不支持的操作"); const data = await handler(event, account); await tryAdd(COLLECTIONS.logs, { action, userId: account.wecomUserId, ok: true, durationMs: Date.now() - startedAt, createdAt: now() }); return ok(data); }
+  catch (error) { await tryAdd(COLLECTIONS.logs, { action, ok: false, code: error.code || "INTERNAL_ERROR", message: error.message, durationMs: Date.now() - startedAt, createdAt: now() }); console.error(error); return fail(error); }
 };

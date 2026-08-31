@@ -31,6 +31,9 @@ function formFromSchema(item, schema) {
     fields: schema.fields,
     fieldCount: schema.fields.length,
     completedCount: 0,
+    attendanceRole: schema.attendanceRole || item.attendanceRole || "",
+    autoAdvance: schema.autoAdvance === true || item.autoAdvance === true,
+    promptSubmitOnComplete: schema.promptSubmitOnComplete === true || item.promptSubmitOnComplete === true,
   };
 }
 

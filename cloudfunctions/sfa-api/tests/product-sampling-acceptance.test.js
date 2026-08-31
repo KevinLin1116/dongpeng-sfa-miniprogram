@@ -18,7 +18,6 @@ function fakeClient() {
   add("taskTypes", { record_id: "type-store", values: { 类型编码: text("STORE") } });
   add("resultDirectory", { record_id: "result-sampling", values: { 结果表名称: text("产品上样结果") } });
   add("taskItems", { record_id: "item-sampling", values: { 任务项名称: text("产品上样") } });
-  add("people", { record_id: "person-lwk", values: { "企业微信账号ID（自动）": text("LinWenKai") } });
   add("stores", { record_id: "store-md002", values: { 门店编码: text("MD002"), 所属大区: ["region-south"] } });
   add("templates", { record_id: "template-sampling", values: { 审批模板编码: text("PRODUCT_SAMPLING"), 审批模板名称: text("产品上样审批") } });
   add("nodes", { record_id: "node-manager", values: { 审批节点名称: text("产品经理审批"), 所属审批模板: ["template-sampling"] } });
@@ -51,6 +50,7 @@ async function testSetupIsVerifiedAndIdempotent() {
   assert.strictEqual(first.publicationRecordId, "new-2");
   assert.strictEqual(client.records[client.sheetsByKey.routes.sheet_id].length, 1);
   assert.strictEqual(client.records[client.sheetsByKey.publications.sheet_id].length, 1);
+  assert.deepStrictEqual(client.records[client.sheetsByKey.publications.sheet_id][0].values["执行人员"], [{ user_id: "LinWenKai" }]);
   const second = await prepareProductSamplingAcceptance(client, { confirmation: CONFIRMATION, nowMs: Date.UTC(2026, 7, 19) });
   assert.strictEqual(second.publicationRecordId, first.publicationRecordId);
   assert.strictEqual(client.records[client.sheetsByKey.routes.sheet_id].length, 1);

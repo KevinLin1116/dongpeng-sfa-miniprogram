@@ -1,9 +1,11 @@
 const STATUS = {
+  not_started: { label: "待开始", className: "pending" },
   pending: { label: "待执行", className: "pending" },
   active: { label: "执行中", className: "active" },
   rectify: { label: "待整改", className: "rectify" },
   review: { label: "待复核", className: "review" },
   completed: { label: "已完成", className: "completed" },
+  missed: { label: "未完成", className: "rectify" },
 };
 
 function statusMeta(status) { return STATUS[status] || STATUS.pending; }

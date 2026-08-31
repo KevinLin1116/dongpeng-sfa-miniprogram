@@ -23,8 +23,9 @@ Page({
   },
   openModule(event) {
     const { code, enabled } = event.currentTarget.dataset;
-    if (!enabled || code !== "STORE") return wx.navigateTo({ url: "/pages/building/index" });
-    wx.navigateTo({ url: "/pages/task-list/index?type=STORE" });
+    if (!enabled || !["STORE", "ATTENDANCE_CHECK", "DAILY_ATTENDANCE"].includes(code)) return wx.navigateTo({ url: "/pages/building/index" });
+    if (code === "DAILY_ATTENDANCE") return wx.navigateTo({ url: "/pages/daily-attendance/index" });
+    wx.navigateTo({ url: `/pages/task-list/index?type=${code}` });
   },
   openMetric(event) {
     wx.navigateTo({ url: `/pages/task-list/index?type=STORE&status=${event.currentTarget.dataset.status}` });

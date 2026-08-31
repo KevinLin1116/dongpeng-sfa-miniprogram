@@ -21,6 +21,8 @@ Page({
       task.locationDisplay = locationDisplay(task.location, task.storeName);
       task.locationGateLocked = locationCheckInPending(task);
       task.executionNotice = task.executionAccess && !task.executionAccess.allowed ? task.executionAccess.message : "";
+      task.attendance = ["ATTENDANCE_CHECK", "DAILY_ATTENDANCE"].includes(task.taskType);
+      task.dailyAttendance = task.taskType === "DAILY_ATTENDANCE";
       task.items = task.items.map((item, index) => ({
         ...item,
         number: String(index + 1).padStart(2, "0"),
@@ -31,9 +33,10 @@ Page({
     } catch (_) { this.setData({ loading: false }); }
   },
   async openLocationSettings() {
+    const attendance = this.data.task?.taskType === "ATTENDANCE_CHECK";
     const confirmed = await new Promise((resolve) => wx.showModal({
       title: "需要定位权限",
-      content: "任务签到需要获取当前位置，用于核验您与任务门店的距离。请在设置中允许使用位置信息。",
+      content: attendance ? "考勤签到需要获取当前位置，用于记录本次考勤位置。请在设置中允许使用位置信息。" : "任务签到需要获取当前位置，用于核验您与任务门店的距离。请在设置中允许使用位置信息。",
       confirmText: "去设置",
       success: (res) => resolve(res.confirm),
       fail: () => resolve(false),
@@ -78,7 +81,12 @@ Page({
       throw new Error("暂时无法获取位置，请稍后重试");
     }
   },
-  async checkIn() {
+  openFirstIncompleteAttendanceItem(task = this.data.task) {
+    const item = task && task.items.find((entry) => entry.status !== "completed");
+    if (item) this.navigateToItem(task, item);
+  },
+  async checkIn(autoAdvance = false) {
+    const shouldAdvance = autoAdvance === true;
     const task = this.data.task;
     if (!task || task.readOnly || this.data.locating || (task.location && task.location.checkedIn)) return;
     this.setData({ locating: true });
@@ -88,6 +96,7 @@ Page({
       this.setData({ "task.location": result, "task.locationDisplay": locationDisplay(result, task.storeName) });
       await this.load(true);
       wx.showToast({ title: "签到成功", icon: "success" });
+      if (shouldAdvance || ["ATTENDANCE_CHECK", "DAILY_ATTENDANCE"].includes(task.taskType)) this.openFirstIncompleteAttendanceItem(this.data.task);
     } catch (error) {
       wx.showToast({ title: error.message || "定位失败", icon: "none", duration: 2500 });
     } finally {
@@ -111,13 +120,28 @@ Page({
       wx.showToast({ title: task.executionNotice, icon: "none", duration: 2500 });
       return;
     }
+    this.navigateToItem(task, item);
+  },
+  navigateToItem(task, item) {
     const readOnly = item.editable === false;
     const path = item.renderer === "sampling" ? "sampling" : "dynamic-form";
-    wx.navigateTo({ url: `/pages/${path}/index?taskId=${encodeURIComponent(this.taskId)}&itemId=${encodeURIComponent(item.id)}&readOnly=${readOnly ? "1" : "0"}` });
+    const attendanceItems = ["ATTENDANCE_CHECK", "DAILY_ATTENDANCE"].includes(task.taskType) ? task.items : [];
+    const currentIndex = attendanceItems.findIndex((entry) => entry.id === item.id);
+    const nextItem = currentIndex >= 0 ? attendanceItems.slice(currentIndex + 1).find((entry) => entry.status !== "completed") : null;
+    const params = [
+      `taskId=${encodeURIComponent(this.taskId)}`,
+      `itemId=${encodeURIComponent(item.id)}`,
+      `readOnly=${readOnly ? "1" : "0"}`,
+      task.taskType === "ATTENDANCE_CHECK" ? "flow=attendance" : task.taskType === "DAILY_ATTENDANCE" ? "flow=daily" : "",
+      item.attendanceRole ? `role=${encodeURIComponent(item.attendanceRole)}` : "",
+      nextItem ? `nextItemId=${encodeURIComponent(nextItem.id)}` : "",
+    ].filter(Boolean).join("&");
+    wx.navigateTo({ url: `/pages/${path}/index?${params}` });
   },
   async submitTask() {
     if (!this.data.task.canSubmit || this.data.submitting) return;
-    const confirmed = await new Promise((resolve) => wx.showModal({ title: "提交任务", content: "提交后任务将锁定；如被退回，仅退回的任务项可修改。", confirmText: "确认提交", success: (res) => resolve(res.confirm) }));
+    const attendance = this.data.task.taskType === "ATTENDANCE_CHECK";
+    const confirmed = await new Promise((resolve) => wx.showModal({ title: attendance ? "提交考勤" : "提交任务", content: attendance ? "提交后考勤结果将锁定且不可修改。" : "提交后任务将锁定；如被退回，仅退回的任务项可修改。", confirmText: attendance ? "确认提交" : "确认提交", success: (res) => resolve(res.confirm) }));
     if (!confirmed) return;
     this.setData({ submitting: true });
     this.operationFeedback = startOperationFeedback(this, {

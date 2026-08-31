@@ -4,6 +4,8 @@ const {
   preUploadTaskItemImages,
   syncExecutionRecord,
   syncTaskItemResult,
+  syncAttendanceCheckInLocation,
+  syncAttendanceResultMetadata,
   taskItemImageCacheKey,
   taskItemImageFromCache,
 } = require("../smart-sheet-writeback");
@@ -31,6 +33,49 @@ async function testExecutionWriteback() {
   assert.deepStrictEqual(updates[0].records[0].values["当前状态"], [{ text: "待复核" }]);
   assert.strictEqual(updates[0].records[0].values["已完成项数"], 2);
   assert.deepStrictEqual(updates[0].records[0].values["提交人"], [{ user_id: "LinWenKai" }]);
+}
+
+async function testAttendanceMetadataWriteback() {
+  const updates = [];
+  const titles = ["签到位置", "签到详细地址", "来源任务", "执行人员", "原图文件ID（审计）", "异常标记", "自动来源任务"];
+  const client = {
+    configured: true,
+    getSheets: async () => [{ title: "13_考勤结果", sheet_id: "attendance-result" }],
+    getFields: async () => titles.map((title) => field(title, title === "签到位置" ? "FIELD_TYPE_LOCATION" : title === "执行人员" ? "FIELD_TYPE_USER" : title === "异常标记" ? "FIELD_TYPE_SINGLE_SELECT" : title === "来源任务" ? "FIELD_TYPE_LINK" : "FIELD_TYPE_TEXT")),
+    updateRecords: async (sheetId, records) => { updates.push({ sheetId, records }); },
+  };
+  await syncAttendanceResultMetadata({
+    client,
+    task: { taskType: "ATTENDANCE_CHECK", sourceTaskRecordId: "publish-1", location: { address: "佛山总部", poiId: "poi-1", longitude: 113.12, latitude: 23.02, accuracy: 8, checkedAt: "2026-08-29T01:00:00.000Z" }, sourceAttendanceTaskId: "source-task" },
+    drafts: [{ smartSheetResultRecordId: "result-1", attendanceEvidence: { photo: { originalFileIds: ["cloud://original"] } } }, { smartSheetResultRecordId: "result-1" }],
+    attendancePlace: "异常:非工作场所",
+    account: { wecomUserId: "SalesA" },
+  });
+  assert.strictEqual(updates[0].records.length, 1);
+  assert.deepStrictEqual(updates[0].records[0].values["签到位置"], [{ source_type: 1, id: "poi-1", latitude: "23.02", longitude: "113.12", title: "佛山总部" }]);
+  assert.deepStrictEqual(updates[0].records[0].values["签到详细地址"], [{ type: "text", text: "佛山总部" }]);
+  assert.deepStrictEqual(updates[0].records[0].values["来源任务"], ["publish-1"]);
+  assert.deepStrictEqual(updates[0].records[0].values["执行人员"], [{ user_id: "SalesA" }]);
+  assert.deepStrictEqual(updates[0].records[0].values["异常标记"], [{ text: "是" }]);
+  assert.deepStrictEqual(updates[0].records[0].values["原图文件ID（审计）"], [{ type: "text", text: "cloud://original" }]);
+}
+
+async function testAttendanceCheckInWritesLocationResultImmediately() {
+  const adds = [];
+  const client = {
+    configured: true,
+    getSheets: async () => [{ title: "13_考勤结果", sheet_id: "attendance-result" }],
+    getFields: async () => [field("执行记录", "FIELD_TYPE_LINK"), field("任务项", "FIELD_TYPE_LINK"), field("签到位置", "FIELD_TYPE_LOCATION"), field("签到详细地址", "FIELD_TYPE_TEXT"), field("来源任务", "FIELD_TYPE_LINK"), field("执行人员", "FIELD_TYPE_USER")],
+    getRecords: async () => [],
+    addRecords: async (sheetId, records) => { adds.push({ sheetId, records }); return { records: [{ record_id: "checkin-result" }] }; },
+  };
+  const result = await syncAttendanceCheckInLocation({ client, task: { taskType: "ATTENDANCE_CHECK", sourceTaskRecordId: "publish-1", smartSheetExecutionRecordId: "exec-1", location: { latitude: 23.02, longitude: 113.12, address: "佛山总部", poiId: "poi-1" }, items: [{ id: "photo-1", configItemId: "photo-config", attendanceRole: "photo" }] }, account: { wecomUserId: "SalesA" } });
+  assert.strictEqual(result.recordId, "checkin-result");
+  assert.deepStrictEqual(adds[0].records[0].values["签到位置"], [{ source_type: 1, id: "poi-1", latitude: "23.02", longitude: "113.12", title: "佛山总部" }]);
+  assert.deepStrictEqual(adds[0].records[0].values["签到详细地址"], [{ type: "text", text: "佛山总部" }]);
+  assert.deepStrictEqual(adds[0].records[0].values["来源任务"], ["publish-1"]);
+  assert.deepStrictEqual(adds[0].records[0].values["执行人员"], [{ user_id: "SalesA" }]);
+  assert.deepStrictEqual(adds[0].records[0].values["任务项"], ["photo-config"]);
 }
 
 async function testResultWriteback() {
@@ -245,6 +290,8 @@ async function testRecordQueryReadsAllPages() {
 async function main() {
   await testEncoders();
   await testExecutionWriteback();
+  await testAttendanceMetadataWriteback();
+  await testAttendanceCheckInWritesLocationResultImmediately();
   await testResultWriteback();
   await testTaskItemImagesUploadConcurrentlyAndReuseCache();
   await testTaskItemImagesReuseLegacyNestedCache();
