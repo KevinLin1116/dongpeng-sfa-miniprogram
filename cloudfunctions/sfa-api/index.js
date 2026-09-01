@@ -473,20 +473,128 @@ async function loadTaskForApproval(approval) {
   return task;
 }
 
-function taskListItem(task) {
-  const currentTime = Date.now();
+function taskEffectiveStatus(task, currentTime = Date.now()) {
   const startAt = Date.parse(task.startAt || "");
   const deadlineAt = Date.parse(task.deadlineAt || "");
-  const status = ["completed", "review", "rectify"].includes(task.status)
+  return ["completed", "review", "rectify"].includes(task.status)
     ? task.status
     : Number.isFinite(startAt) && currentTime < startAt
       ? "not_started"
       : Number.isFinite(deadlineAt) && currentTime > deadlineAt
         ? "missed"
         : task.status;
+}
+
+function chinaWeekRange(reference = Date.now()) {
+  const date = chinaParts(reference);
+  const [year, month, day] = date.split("-").map(Number);
+  const dayOfWeek = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+  const mondayOffset = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+  const monday = Date.UTC(year, month - 1, day - mondayOffset);
+  const format = (timestamp) => {
+    const value = new Date(timestamp);
+    return `${value.getUTCFullYear()}-${String(value.getUTCMonth() + 1).padStart(2, "0")}-${String(value.getUTCDate()).padStart(2, "0")}`;
+  };
+  return { start: format(monday), end: format(monday + 6 * 24 * 60 * 60 * 1000) };
+}
+
+function completedInCurrentChinaWeek(task, range) {
+  if (taskEffectiveStatus(task) !== "completed") return false;
+  const completedAt = task.completedAt || task.submittedAt || task.updatedAt || "";
+  const completedDate = completedAt && Number.isFinite(Date.parse(completedAt)) ? chinaParts(completedAt) : "";
+  return Boolean(completedDate && completedDate >= range.start && completedDate <= range.end);
+}
+
+function chinaDate(value) {
+  return value && Number.isFinite(Date.parse(value)) ? chinaParts(value) : "";
+}
+
+function taskInChinaWeek(task, range) {
+  const startDate = chinaDate(task.startAt);
+  const deadlineDate = chinaDate(task.deadlineAt);
+  return (startDate && startDate >= range.start && startDate <= range.end)
+    || (deadlineDate && deadlineDate >= range.start && deadlineDate <= range.end);
+}
+
+function taskCompletionTime(task) {
+  const value = task.completedAt || task.submittedAt || "";
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function personalStats(tasks, reference = Date.now()) {
+  const weekRange = chinaWeekRange(reference);
+  const today = chinaParts(reference);
+  const month = today.slice(0, 7);
+  const effectiveStatus = (task) => taskEffectiveStatus(task, reference);
+  const incomplete = (task) => !["completed", "review"].includes(effectiveStatus(task));
+  const isDueToday = (task) => chinaDate(task.deadlineAt) === today && incomplete(task);
+  const isDueSoon = (task) => {
+    const deadline = Date.parse(task.deadlineAt || "");
+    return incomplete(task) && Number.isFinite(deadline) && deadline >= reference && deadline - reference <= 24 * 60 * 60 * 1000;
+  };
+  const weeklyTasks = tasks.filter((task) => taskInChinaWeek(task, weekRange));
+  const weeklyCompleted = weeklyTasks.filter((task) => completedInCurrentChinaWeek(task, weekRange));
+  const onTimeCompleted = weeklyCompleted.filter((task) => {
+    const completedAt = taskCompletionTime(task);
+    const deadlineAt = Date.parse(task.deadlineAt || "");
+    return completedAt && (!Number.isFinite(deadlineAt) || completedAt <= deadlineAt);
+  });
+  const typeMap = new Map();
+  weeklyTasks.forEach((task) => {
+    const key = task.taskType || "OTHER";
+    const current = typeMap.get(key) || { code: key, name: task.taskTypeName || key, planned: 0, completed: 0 };
+    current.planned += 1;
+    if (completedInCurrentChinaWeek(task, weekRange)) current.completed += 1;
+    typeMap.set(key, current);
+  });
+  const taskTypes = [...typeMap.values()].map((item) => ({
+    ...item,
+    outstanding: Math.max(0, item.planned - item.completed),
+    completionRate: item.planned ? Math.round(item.completed * 100 / item.planned) : 0,
+  })).sort((a, b) => b.outstanding - a.outstanding || b.planned - a.planned).slice(0, 5);
+  const monthlyDailyTasks = tasks.filter((task) => task.taskType === DAILY_TASK_TYPE && String(task.dailyAttendanceDate || chinaDate(task.startAt)).slice(0, 7) === month);
+  const attendance = {
+    normal: monthlyDailyTasks.filter((task) => effectiveStatus(task) === "completed" && task.dailyJurisdictionStatus !== "abnormal").length,
+    abnormal: monthlyDailyTasks.filter((task) => effectiveStatus(task) === "completed" && task.dailyJurisdictionStatus === "abnormal").length,
+    missed: monthlyDailyTasks.filter((task) => effectiveStatus(task) === "missed").length,
+  };
+  const recentCompleted = tasks.filter((task) => effectiveStatus(task) === "completed" && taskCompletionTime(task)).sort((a, b) => taskCompletionTime(b) - taskCompletionTime(a)).slice(0, 3).map((task) => ({
+    id: task._id || task.id,
+    name: task.name,
+    taskTypeName: task.taskTypeName || task.taskType || "任务",
+    completedAt: task.completedAt || task.submittedAt,
+  }));
+  return {
+    periodLabel: `${weekRange.start.slice(5).replace("-", "/")} - ${weekRange.end.slice(5).replace("-", "/")}`,
+    overview: {
+      weeklyPlanned: weeklyTasks.length,
+      weeklyCompleted: weeklyCompleted.length,
+      completionRate: weeklyTasks.length ? Math.round(weeklyCompleted.length * 100 / weeklyTasks.length) : 0,
+      onTimeCompleted: onTimeCompleted.length,
+    },
+    today: {
+      dueToday: tasks.filter(isDueToday).length,
+      active: tasks.filter((task) => effectiveStatus(task) === "active").length,
+      dueSoon: tasks.filter(isDueSoon).length,
+      overdue: tasks.filter((task) => effectiveStatus(task) === "missed").length,
+    },
+    taskTypes,
+    attendance: { ...attendance, monthLabel: `${month.replace("-", "年")}月` },
+    recentCompleted,
+    pending: tasks.filter((task) => effectiveStatus(task) === "pending").length,
+    active: tasks.filter((task) => effectiveStatus(task) === "active").length,
+    rectify: tasks.filter((task) => effectiveStatus(task) === "rectify").length,
+    completed: tasks.filter((task) => effectiveStatus(task) === "completed").length,
+  };
+}
+
+function taskListItem(task) {
+  const status = taskEffectiveStatus(task);
   return {
     id: task._id || task.id,
     taskType: task.taskType,
+    taskTypeName: task.taskTypeName || task.taskType,
     name: task.name,
     storeName: task.storeName,
     storeCode: task.storeCode,
@@ -1818,6 +1926,10 @@ const handlers = {
     if (!saved) throw new ApiError("CACHE_WRITE_FAILED", "任务类型已读取，但写入云数据库缓存失败");
     return { modules, count: modules.length, refreshedAt };
   },
+  async listVisibleTaskTypes(_, account) {
+    if (!smartSheet.configured) throw new ApiError("SMART_SHEET_NOT_CONFIGURED", "云函数尚未配置企业微信智能表格凭证");
+    return readTaskTypes(smartSheet);
+  },
   async migrateAttendanceTaskConfiguration(_, account) {
     if (!account.roles.includes("管理员")) throw new ApiError("FORBIDDEN", "只有管理员可以补齐考勤任务配置");
     if (!smartSheet.configured) throw new ApiError("SMART_SHEET_NOT_CONFIGURED", "云函数尚未配置企业微信智能表格凭证");
@@ -1927,9 +2039,17 @@ const handlers = {
     return { taskId: task.id, itemId: item.id, status, recordId: synced.recordId || "", syncedAt: synced.syncedAt || "" };
   },
   async bootstrap(_, account) {
-    const tasks = await loadTasks(account); const counts = (status) => tasks.filter((task) => task.status === status).length;
+    const tasks = await loadTasks(account);
+    const currentTime = Date.now();
+    const effectiveStatus = (task) => taskEffectiveStatus(task, currentTime);
+    const counts = (status) => tasks.filter((task) => effectiveStatus(task) === status).length;
+    const weekRange = chinaWeekRange(currentTime);
     const taskTypeCache = await readCache("config_task_types");
-    return { profile: { name: account.name, roleLabel: account.roles[0] || "业务员", userId: account.wecomUserId }, metrics: { pending: counts("pending"), active: counts("active"), rectify: counts("rectify"), weekCompleted: counts("completed") }, modules: taskTypeCache?.value || [], config: { taskTypesReady: Boolean(taskTypeCache?.value?.length), taskTypesRefreshedAt: taskTypeCache?.refreshedAt || "" } };
+    const modules = (taskTypeCache?.value || []).map((module) => ({
+      ...module,
+      todoCount: tasks.filter((task) => task.taskType === module.code && ["pending", "active"].includes(effectiveStatus(task))).length,
+    }));
+    return { profile: { name: account.name, roleLabel: account.roles[0] || "业务员", userId: account.wecomUserId }, metrics: { pending: counts("pending"), active: counts("active"), rectify: counts("rectify"), weekCompleted: tasks.filter((task) => completedInCurrentChinaWeek(task, weekRange)).length }, modules, config: { taskTypesReady: Boolean(modules.length), taskTypesRefreshedAt: taskTypeCache?.refreshedAt || "" } };
   },
   async listTasks(event, account) { return (await loadTasks(account)).filter((task) => !event.taskType || task.taskType === event.taskType).map(taskListItem); },
   async getDailyAttendanceCalendar(event, account) {
@@ -2454,7 +2574,7 @@ const handlers = {
     }
     return completeCreateOnlyOperation(operation, { status: event.decision });
   },
-  async getMyStats(_, account) { const tasks = await loadTasks(account); const count = (status) => tasks.filter((task) => task.status === status).length; const completed = count("completed"); return { pending: count("pending"), active: count("active"), rectify: count("rectify"), completed, completionRate: tasks.length ? Math.round(completed * 100 / tasks.length) : 0 }; },
+  async getMyStats(_, account) { return personalStats(await loadTasks(account)); },
   async getProfile(_, account) { const pending = await handlers.listApprovals({ status: "pending" }, account); return { profile: { name: account.name, roleLabel: account.roles[0] || "业务员", userId: account.wecomUserId, mobile: account.mobile || "", scopeLabel: account.scopeLabel }, approvalCount: pending.length, isAdmin: account.roles.includes("管理员") }; },
 };
 

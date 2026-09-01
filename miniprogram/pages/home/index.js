@@ -27,8 +27,6 @@ Page({
     if (code === "DAILY_ATTENDANCE") return wx.navigateTo({ url: "/pages/daily-attendance/index" });
     wx.navigateTo({ url: `/pages/task-list/index?type=${code}` });
   },
-  openMetric(event) {
-    wx.navigateTo({ url: `/pages/task-list/index?type=STORE&status=${event.currentTarget.dataset.status}` });
-  },
+  openMetric(event) { wx.navigateTo({ url: `/pages/task-list/index?status=${event.currentTarget.dataset.status}` }); },
   openProfile() { wx.switchTab({ url: "/pages/profile/index" }); },
 });

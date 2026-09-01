@@ -35,6 +35,7 @@
       <view wx:for="{{modules}}" wx:key="code" class="module-item" data-code="{{item.code}}" data-enabled="{{item.enabled}}" bindtap="openModule">
         <view class="module-icon tone-{{item.tone}}">{{item.shortName}}</view>
         <view class="module-copy"><text class="module-name">{{item.name}}</text><text class="module-desc">{{item.description}}</text></view>
+        <view wx:if="{{item.todoCount}}" class="module-todo"><text>待处理</text><text class="module-todo-count">{{item.todoCount > 99 ? '99+' : item.todoCount}}</text></view>
         <text class="module-arrow tone-text-{{item.tone}}">›</text>
       </view>
     </view>

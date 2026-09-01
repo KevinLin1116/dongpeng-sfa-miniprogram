@@ -1,1 +1,45 @@
-<view class="page"><view class="safe-top"></view><view class="nav"><text class="nav-title">统计</text></view><view class="period">本周个人任务</view><view class="rate-card card"><text>任务完成率</text><text class="rate">{{stats.completionRate || 0}}%</text><view class="rate-line"><view style="width:{{stats.completionRate || 0}}%"></view></view></view><view class="stats-grid"><view class="card"><text>待执行</text><text>{{stats.pending || 0}}</text></view><view class="card"><text>执行中</text><text class="warning">{{stats.active || 0}}</text></view><view class="card"><text>待整改</text><text class="danger">{{stats.rectify || 0}}</text></view><view class="card"><text>已完成</text><text class="success">{{stats.completed || 0}}</text></view></view><view class="note card">更多经营分析与跨区域统计，请在企业微信智能表格看板中查看。</view></view>
+<view class="page stats-page">
+  <view class="safe-top"></view>
+  <view class="nav"><text class="nav-title">执行看板</text></view>
+  <view wx:if="{{loading}}" class="stats-loading"><view class="skeleton hero-skeleton"></view><view class="skeleton row-skeleton"></view><view class="skeleton row-skeleton"></view></view>
+  <block wx:else>
+    <view class="stats-kicker"><text>我的本周执行</text><text>{{stats.periodLabel}}</text></view>
+    <view class="hero-panel">
+      <view class="hero-decoration"></view>
+      <view class="hero-copy"><text class="hero-label">本周完成率</text><text class="hero-rate">{{stats.overview.completionRate || 0}}%</text><text class="hero-caption">已完成 {{stats.overview.weeklyCompleted || 0}} / {{stats.overview.weeklyPlanned || 0}} 项计划</text></view>
+      <view class="hero-side"><text>按时完成</text><text>{{stats.overview.onTimeCompleted || 0}}</text><text>项</text></view>
+      <view class="hero-track"><view style="width:{{stats.overview.completionRate || 0}}%"></view></view>
+    </view>
+
+    <view class="section-title"><text></text>今日优先事项</view>
+    <view class="priority-grid">
+      <view class="priority-card danger"><text class="priority-label">今日待办</text><text class="priority-value">{{stats.today.dueToday || 0}}</text><text>截止今日</text></view>
+      <view class="priority-card warning"><text class="priority-label">执行中</text><text class="priority-value">{{stats.today.active || 0}}</text><text>正在处理</text></view>
+      <view class="priority-card alert"><text class="priority-label">24小时临期</text><text class="priority-value">{{stats.today.dueSoon || 0}}</text><text>优先完成</text></view>
+      <view class="priority-card muted"><text class="priority-label">已逾期</text><text class="priority-value">{{stats.today.overdue || 0}}</text><text>请尽快补办</text></view>
+    </view>
+
+    <view class="section-title"><text></text>任务类型进度</view>
+    <view class="type-panel card">
+      <view wx:for="{{stats.taskTypes}}" wx:key="code" class="type-row">
+        <view class="type-row-head"><text>{{item.name}}</text><text>{{item.completed}} / {{item.planned}} 项</text></view>
+        <view class="type-progress"><view style="width:{{item.completionRate}}%"></view></view>
+        <text class="type-outstanding" wx:if="{{item.outstanding}}">尚有 {{item.outstanding}} 项未完成</text>
+        <text class="type-outstanding done" wx:else>本周已完成</text>
+      </view>
+      <view wx:if="{{!stats.taskTypes.length}}" class="empty-inline">本周暂无计划任务</view>
+    </view>
+
+    <view class="section-title"><text></text>日常考勤</view>
+    <view class="attendance-panel card">
+      <view class="attendance-copy"><text class="attendance-title">{{stats.attendance.monthLabel}}打卡</text><text>查看本月日常考勤执行情况</text></view>
+      <view class="attendance-values"><view><text class="success">{{stats.attendance.normal || 0}}</text><text>正常</text></view><view><text class="danger">{{stats.attendance.abnormal || 0}}</text><text>异常</text></view><view><text class="warning">{{stats.attendance.missed || 0}}</text><text>缺卡</text></view></view>
+    </view>
+
+    <view class="section-title"><text></text>最近完成</view>
+    <view class="recent-panel card">
+      <view wx:for="{{recentCompleted}}" wx:key="id" class="recent-row"><view><text class="recent-name">{{item.name}}</text><text class="recent-type">{{item.taskTypeName}}</text></view><text class="recent-time">{{item.completedAtText}}</text></view>
+      <view wx:if="{{!recentCompleted.length}}" class="empty-inline">暂未完成任务，完成后会显示在这里</view>
+    </view>
+  </block>
+</view>

@@ -34,6 +34,7 @@
     "borderStyle": "white",
     "list": [
       { "pagePath": "pages/home/index", "text": "首页" },
+      { "pagePath": "pages/approvals/index", "text": "审核" },
       { "pagePath": "pages/stats/index", "text": "统计" },
       { "pagePath": "pages/profile/index", "text": "我的" }
     ]

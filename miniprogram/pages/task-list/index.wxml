@@ -6,7 +6,7 @@
   <view wx:else>
     <view wx:for="{{shownTasks}}" wx:key="id" class="task-card card" data-id="{{item.id}}" bindtap="openTask">
       <view class="task-head"><view class="task-mark">{{attendance?'查':'店'}}</view><text class="task-name">{{item.name}}</text><text class="status status-{{item.statusMeta.className}}">{{item.statusMeta.label}}</text><text class="enter">›</text></view>
-      <view class="task-info"><text>任务项</text><text>{{item.itemSummary}}</text><block wx:if="{{!attendance}}"><text>任务对象</text><text>{{item.storeName}}</text><text>门店编码</text><text>{{item.storeCode}}</text></block><text>执行时间</text><text>{{item.timeText}}</text><text>执行人</text><text>{{item.executorNames}}</text></view>
+      <view class="task-info"><text>任务项</text><text>{{item.itemSummary}}</text><block wx:if="{{allTaskTypes}}"><text>任务类型</text><text>{{item.taskTypeName}}</text></block><block wx:if="{{!attendance && !allTaskTypes}}"><text>任务对象</text><text>{{item.storeName}}</text><text>门店编码</text><text>{{item.storeCode}}</text></block><text>执行时间</text><text>{{item.timeText}}</text><text>执行人</text><text>{{item.executorNames}}</text></view>
       <view class="progress-row"><text>完成进度</text><view class="progress"><view style="width:{{item.progress}}%"></view></view><text class="progress-value">{{item.progress}}%</text></view>
     </view>
     <view wx:if="{{!shownTasks.length}}" class="empty">{{emptyText}}</view>

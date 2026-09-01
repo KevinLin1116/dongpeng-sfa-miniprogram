@@ -1,2 +1,12 @@
 const { call } = require("../../utils/api");
-Page({ data: { loading: true, stats: {} }, async onShow() { try { this.setData({ stats: await call("getMyStats", {}, { silent: true }), loading: false }); } catch (_) { this.setData({ loading: false }); } } });
+const { dateTime } = require("../../utils/format");
+
+Page({
+  data: { loading: true, stats: {}, recentCompleted: [] },
+  async onShow() {
+    try {
+      const stats = await call("getMyStats", {}, { silent: true });
+      this.setData({ stats, recentCompleted: (stats.recentCompleted || []).map((item) => ({ ...item, completedAtText: dateTime(item.completedAt) })), loading: false });
+    } catch (_) { this.setData({ loading: false }); }
+  },
+});

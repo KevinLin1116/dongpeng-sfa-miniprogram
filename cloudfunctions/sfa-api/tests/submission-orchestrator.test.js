@@ -20,12 +20,13 @@ function testApprovalRecord() {
     samplingSnapshot: { groups: [{ ruleRecordId: "rule-1", name: "必上", minRequired: 1, products: [{ productRecordId: "product-1", code: "DP1", name: "产品1", specification: "600x1200" }] }] },
   };
   const record = buildApprovalRecord({
-    task: { id: "task-1", name: "门店任务", storeRecordId: "store-1", storeName: "门店1" }, item,
+    task: { id: "task-1", name: "门店任务", taskType: "STORE", taskTypeName: "门店任务", storeRecordId: "store-1", storeName: "门店1" }, item,
     draft: { values: { "product-1": ["cloud://p1"] }, smartSheetImageCache: { "cloud://p1": { image_url: "https://doc/p1" } } },
     account: { wecomUserId: "SalesA", name: "业务员甲" }, round: 1, resultRecordIds: [{ productRecordId: "product-1", recordId: "result-1", resultKey: "key-1" }],
     route: { templateRecordId: "template-1", templateName: "产品审批", nodeIndex: 0, nodeRecordId: "node-1", nodeName: "产品经理审批", nodeDuty: "产品经理", routeRecordId: "route-1", regionRecordId: "region-1", regionCode: "SOUTH", regionName: "华南", resolvedAt: "2026-08-12T00:00:00.000Z", reviewerRecordId: "person-1", userId: "ManagerA", name: "经理甲" },
   });
   assert.strictEqual(record.currentReviewerUserId, "ManagerA");
+  assert.deepStrictEqual({ taskType: record.taskType, taskTypeName: record.taskTypeName }, { taskType: "STORE", taskTypeName: "门店任务" });
   assert.strictEqual(record.evidenceGroups[0].products[0].images[0].image_url, "https://doc/p1");
   assert.strictEqual(record.resultRecordIds[0].recordId, "result-1");
   assert.deepStrictEqual(record.reviewProductIds, ["product-1"]);

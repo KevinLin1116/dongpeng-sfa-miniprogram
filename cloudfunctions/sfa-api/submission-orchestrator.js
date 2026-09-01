@@ -77,6 +77,8 @@ function buildApprovalRecord({ task, item, draft, account, route, round, resultR
     id,
     taskId: task.id,
     taskName: task.name,
+    taskType: task.taskType || "",
+    taskTypeName: task.taskTypeName || task.taskType || "未分类任务",
     itemId: item.id,
     itemName: item.name,
     itemExecutionRecordId: item.smartSheetItemExecutionRecordId,

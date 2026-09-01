@@ -1,3 +1,26 @@
-<view class="page"><view class="safe-top"></view><view class="nav"><view class="nav-back" bindtap="goBack">‹</view><text class="nav-title">任务审核</text></view><view class="approval-tabs"><view wx:for="{{tabs}}" wx:key="key" class="approval-tab {{active===item.key?'active':''}}" data-key="{{item.key}}" bindtap="changeTab">{{item.label}}</view></view>
-  <view wx:if="{{loading}}" class="empty">正在加载…</view><view wx:else><view wx:for="{{approvals}}" wx:key="id" class="approval-card card" data-id="{{item.id}}" bindtap="open"><view class="approval-head"><text>{{item.itemName}}</text><text class="status status-{{item.status==='pending'?'review':'completed'}}">{{item.statusLabel}}</text></view><view class="approval-name">{{item.taskName}}</view><view class="approval-grid"><text>任务门店</text><text>{{item.storeName}}</text><text>提交人</text><text>{{item.submitterName}}</text><text>提交时间</text><text>{{item.submittedText}}</text></view></view><view wx:if="{{!approvals.length}}" class="empty">当前没有审核任务</view></view>
+<view class="page approvals-page">
+  <view class="safe-top"></view>
+  <view class="nav"><text class="nav-title">审核</text></view>
+  <view class="approval-tabs card">
+    <view wx:for="{{tabs}}" wx:key="key" class="approval-tab {{active===item.key?'active':''}}" data-key="{{item.key}}" bindtap="changeTab">{{item.label}}</view>
+  </view>
+
+  <view class="filter-card">
+    <picker class="filter-item card" mode="selector" range="{{taskTypeOptions}}" range-key="label" value="{{taskTypeIndex}}" bindchange="changeTaskType">
+      <view class="filter-line"><text class="filter-label">任务类型</text><text class="filter-value">{{taskTypeOptions[taskTypeIndex].label}}</text><text class="filter-arrow">⌄</text></view>
+    </picker>
+  </view>
+
+  <view wx:if="{{loading}}" class="empty">正在加载审批记录…</view>
+  <block wx:else>
+    <view wx:for="{{approvals}}" wx:key="id" class="approval-card card" data-id="{{item.id}}" bindtap="open">
+      <view class="approval-top"><text class="type-tag">{{item.taskTypeLabel}}</text><text class="status status-{{item.status==='pending'?'review':'completed'}}">{{item.statusLabel}}</text></view>
+      <text class="approval-name">{{item.taskName}}</text>
+      <view class="approval-item"><text>审批事项</text><text>{{item.itemName}}</text></view>
+      <view class="approval-item"><text>执行人</text><text>{{item.executorLabel}}</text></view>
+      <view wx:if="{{item.storeName}}" class="approval-item"><text>任务门店</text><text>{{item.storeName}}</text></view>
+      <view class="approval-foot"><text>{{item.submittedText}}</text><text>查看详情 ›</text></view>
+    </view>
+    <view wx:if="{{!approvals.length}}" class="empty">{{sourceApprovals.length ? '没有符合筛选条件的审批记录' : '当前没有审批任务'}}</view>
+  </block>
 </view>
